@@ -1,0 +1,53 @@
+name: cop
+
+# Images are pinned to tag + multi-arch index digest (linux/arm64 and linux/amd64).
+
+services:
+  # Local AWS API emulator. Runs as uid 1001 (the image's entrypoint drops root)
+  # and ships its own healthcheck against /_floci/init.
+  floci:
+    image: floci/floci:2.4.0@sha256:5ee85db604c4aa74ac76e07ea5cc83086f37bb472bf3dbb97e34019e48efae9c
+    environment:
+      FLOCI_STORAGE_MODE: ${FLOCI_STORAGE_MODE:-persistent}
+    ports:
+      - "127.0.0.1:${FLOCI_PORT:-4566}:4566"
+    volumes:
+      - floci-data:/app/data
+    restart: unless-stopped
+
+  # One-shot tool containers (profile "tools"): `make aws ARGS=...`, `make tf ARGS=...`.
+  # Credentials and endpoint are hardcoded to Floci on purpose and ~/.aws is never
+  # mounted, so these containers cannot reach real AWS.
+  aws:
+    image: amazon/aws-cli:2.38.6@sha256:bdb0dd07c54dfc7fe6526387dcf23eaab269875a20d647ae4de8196ea04d6bd4
+    profiles: [tools]
+    environment: &local-aws
+      AWS_ACCESS_KEY_ID: test
+      AWS_SECRET_ACCESS_KEY: test
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+      AWS_ENDPOINT_URL: http://floci:4566
+    working_dir: /work
+    volumes:
+      - ./:/work
+    depends_on:
+      floci:
+        condition: service_healthy
+
+  terraform:
+    image: hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3
+    profiles: [tools]
+    environment:
+      <<: *local-aws
+      TF_PLUGIN_CACHE_DIR: /plugin-cache
+      TF_IN_AUTOMATION: "1"
+    working_dir: /work
+    volumes:
+      - ./:/work
+      - tf-plugin-cache:/plugin-cache
+    depends_on:
+      floci:
+        condition: service_healthy
+
+volumes:
+  floci-data:
+  tf-plugin-cache:
