@@ -7,13 +7,16 @@ management for multiple applications, developed locally on OrbStack with
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 2 (local observability stack).** Only what is listed under
+> **Status: Phase 3 (sample application).** Only what is listed under
 > "Working today" has been implemented and tested. The full README is written in Phase 9.
 
 ## Working today
 
 | Component | Version | Local URL | Notes |
 |---|---|---|---|
+| E-commerce API | Node.js `24.22.2`, Fastify `5.12.8` | http://127.0.0.1:8080 | Metrics, JSON logs, OTel trace IDs; non-root, read-only FS |
+| PostgreSQL | `18.6` | internal | `ecommerce` DB; owner role for migrations, row-only role for the API |
+| Redis | `8.8.4` | internal | Cache only: password, 64 MB LRU, no persistence |
 | Prometheus | `v3.15.1` | http://127.0.0.1:9090 | 15s scrape/eval, 3d / 5GB retention, file-based target discovery |
 | Grafana | `13.2.5` | http://127.0.0.1:3000 | Datasources provisioned from Git; login from `.env` |
 | Loki | `3.7.9` | http://127.0.0.1:3100 | Filesystem storage, 72h retention |
@@ -21,13 +24,72 @@ Inspired by Uber Engineering's
 | Alertmanager | `v0.34.2` | http://127.0.0.1:9093 | Placeholder route; real routing in Phase 4 |
 | Node Exporter | `v1.12.1` | internal | Host = OrbStack Linux VM locally |
 | cAdvisor | `v0.60.6` | internal | Per-container CPU, memory, network |
-| Blackbox Exporter | `v0.29.1` | internal | HTTP uptime probes |
+| Blackbox Exporter | `v0.29.1` | internal | HTTP uptime probes + TCP probes (Postgres, Redis) |
+| k6 | `1.8.2` | — | Load generator (`make load`) |
 | Floci (AWS emulator) | `2.4.0` | http://127.0.0.1:4566 | State persisted in the `floci-data` volume |
 | AWS CLI | `2.38.6` | — | Container, hardwired to Floci with fake credentials |
 | Terraform | `1.16.7` | — | Container, Floci credentials, shared plugin cache |
 
 All images are pinned by tag and multi-arch digest. No `latest` tags.
 Everything published binds to `127.0.0.1`; exporters are only reachable inside the Docker network.
+
+### E-commerce API
+
+| Endpoint | Behaviour |
+|---|---|
+| `GET /health` | `200 ok`, `200 degraded` (Redis down, API still works), `503 down` (Postgres down). Uses its own DB connection, so a saturated request pool is not reported as "Postgres down" |
+| `GET /products` | Redis cache-aside, 30s TTL; `x-cache: hit\|miss\|bypass`. Falls back to Postgres if Redis is down |
+| `POST /orders` | `{"items":[{"product_id":"<uuid>","quantity":1}]}` → `201`; `409` out of stock, `422` unknown product, `400` invalid (strict schema: unknown fields and wrong types are rejected, not dropped or coerced). Product rows are locked (`FOR UPDATE`) so racing buyers get a clean `409`; `CHECK (stock >= 0)` is the last line against overselling |
+| `GET /orders/:id` | `200`, `404`, or `400` for a malformed id |
+| `GET /metrics` | Prometheus metrics |
+
+**Database access (least privilege).** Schema changes and runtime access use different roles:
+
+| Role | Used by | Can |
+|---|---|---|
+| `ecommerce_owner` | `ecommerce-migrate` (one-shot job, runs before the API starts) | Owns the database; applies `migrations/*.sql` |
+| `ecommerce_app` | the API | Read products, change `products.stock` only, insert/read orders. Cannot update prices, update/delete orders, or create/alter/drop anything |
+
+Grants live in [`003_app_grants.sql`](apps/ecommerce-api/migrations/003_app_grants.sql), so new
+tables stay private until a migration grants access. Neither role can connect to the
+`postgres` or `template1` databases. `make test` verifies all of this.
+
+**Startup behaviour.** If Postgres is down, the API still starts, returns `503` from
+`/health` and logs the outage, then recovers when Postgres returns. If Redis is down,
+it starts `degraded`. Either way, one `error` line is logged at startup, and it carries the
+real cause (e.g. `WRONGPASS`, `ECONNREFUSED`), not just "client is offline".
+
+**Saturation vs outage.** When every request connection is busy (slow queries, lock waits),
+`/health` and `dependency_up{postgres}` stay `up`. The saturation shows as
+`db_pool_connections{state="waiting"} > 0` and `app_exceptions_total{type="POOL_TIMEOUT"}`.
+
+**Metrics** (all labels bounded; route is the template `/orders/:id`, never a raw ID):
+`http_requests_total`, `http_request_duration_seconds` (buckets include 0.5s for the p95 SLO),
+`http_requests_in_flight`, `app_exceptions_total{type}`, `dependency_up{dependency=postgres|redis}`,
+`db_pool_connections{state}`, `cache_requests_total{result}`, `orders_total{result=created|rejected|error}`,
+plus Node.js runtime metrics. `/metrics` and `/health` are excluded from request metrics and the in-flight gauge.
+
+**Logs**: one JSON line per event with `time, level, service, environment, msg`, and `trace_id`
+inside requests. An incoming W3C `traceparent` header is continued, so a caller's trace ID
+appears in this service's logs. Bodies and headers are never logged; known secret fields are
+redacted in the app before Alloy's redaction runs. Dependency outages log one `error` line
+when they start and one `info` line when they recover.
+
+**Investigating with LogQL** (Grafana → Explore → Loki):
+
+```logql
+{service="ecommerce-api"} | json | status_code >= 500                     # HTTP 5xx
+{service="ecommerce-api", level="error"} | json | dependency="postgres"   # database failures
+{service="ecommerce-api", level="error"} | json | dependency="redis"      # Redis failures
+{service="ecommerce-api", level=~"error|fatal"} |= "unhandled error"      # application exceptions
+{service="ecommerce-api"} |= "startup failed"                             # startup errors
+{service="ecommerce-api"} | json | duration_ms > 100                      # slow requests
+{service="ecommerce-api"} | trace_id="<id>"                               # everything for one request
+sum by (service) (count_over_time({level=~"error|fatal"}[5m]))           # error volume per service
+```
+
+**Tracing scope:** OpenTelemetry creates spans so trace IDs propagate and correlate logs.
+Spans are not exported or stored, because no trace backend is in scope; adding Grafana Tempo is a future improvement.
 
 ### Adding a monitoring target
 
@@ -40,10 +102,17 @@ Drop a file into `observability/prometheus/targets/`. Prometheus picks it up wit
   labels: {environment: aws, host: app-1}
 ```
 
+Target *files* reload automatically; edits to `prometheus.yml`, `alertmanager.yml`,
+`blackbox.yml` or `config.alloy` need `make reload` (also run by `make up`).
+
 ### Log pipeline
 
 Alloy collects logs from every container in this compose project (and `/var/log/syslog`,
 `kern.log`, `auth.log` on Linux hosts), then:
+
+0. **Keeps only Compose-named containers** (`cop-*`). Compose-built images carry the project
+   labels, so an ad-hoc `docker run cop/ecommerce-api:dev` would otherwise pose as the real
+   service in Loki.
 
 1. **Redacts** `password`, `token`, `secret`, `api_key`, `authorization`… values (JSON and `key=value`) and Bearer tokens.
 2. **Parses** `level` from JSON or logfmt and lowercases it.
@@ -60,6 +129,12 @@ Alloy collects logs from every container in this compose project (and `/var/log/
   reach Loki, but Docker's own log files (`docker logs`) still hold the original lines. The
   real rule is that applications never log secrets (enforced in the app code from Phase 3).
   The JSON pattern only matches string values (`"password": "…"`), not numbers or nested objects.
+- **Locally built images are never pulled.** `cop/ecommerce-api` has `pull_policy: build`
+  (API) and `never` (migrate job): the `cop` namespace is unclaimed on Docker Hub, so a pull
+  could fetch someone else's image and hand it the database owner password. Tested by `make test`.
+- **Deferred to the AWS phase:** the API serves `/metrics` on its public port (fine on
+  `127.0.0.1`, not behind a public load balancer), and secrets are environment variables
+  (visible in `docker inspect`); both move behind a private port / AWS SSM in Phase 7.
 - **Log `level` label is allowlisted** to `debug|info|warn|error|fatal` (`warning`→`warn`,
   `err`→`error`, `critical`/`panic`→`fatal`); any other value gets no label, so free text
   can't create new label values.
@@ -74,6 +149,17 @@ Alloy collects logs from every container in this compose project (and `/var/log/
 - OrbStack's VM has no syslog/journal, so system-log collection is idle locally (active on EC2).
 - Loki and Alloy images are distroless with no probe tool, so they have no Compose healthcheck;
   `make up` waits for Loki's `/ready`, and Blackbox probes both.
+- Postgres passwords from `.env` are applied only when the `postgres-data` volume is first
+  created. Changing them later needs `ALTER ROLE` (or recreating the volume, which deletes data).
+- Integration test scripts run under macOS's built-in bash 3.2; they avoid constructs it mis-parses.
+- **One-shot jobs that exit within a second (`ecommerce-migrate`) don't reach Loki**: Alloy
+  discovers *running* containers, and the job is gone first. Read them with
+  `docker compose logs ecommerce-migrate`. A failed migration stops `make up` with
+  `service "ecommerce-migrate" didn't complete successfully` (Compose may also print a
+  misleading `dependency redis failed to start`). Crash-looping services are unaffected:
+  Docker restarts the same container and Alloy keeps tailing it.
+- If a migration fails while an older API container is already running, that container keeps
+  running on the previous schema; Compose only blocks starting a new one.
 
 ## Prerequisites
 
@@ -86,11 +172,13 @@ Terraform and the AWS CLI are **not** installed on the host; they run as contain
 
 ```bash
 cp .env.example .env
-# set GRAFANA_ADMIN_PASSWORD in .env, e.g. openssl rand -base64 18
+# fill in the empty passwords in .env (each line says how to generate it)
 make doctor   # read-only toolchain check
-make up       # start the stack, waits for healthchecks
+make unit     # app unit tests (in Docker, no stack needed)
+make up       # build the app, start the stack, wait for healthchecks, reload configs
 make health   # every endpoint ready + AWS CLI provably pointed at Floci
-make test     # integration tests: targets, metrics, log ingestion, redaction, datasources
+make test     # integration tests: platform + app (briefly stops Redis to test an outage)
+make load     # k6 shoppers for 2m (DURATION=5m to change); watch Grafana meanwhile
 make aws ARGS="s3 ls"
 make tf ARGS="version"
 make down     # stop (keeps data); `make clean` deletes volumes after confirmation

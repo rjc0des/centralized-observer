@@ -23,6 +23,107 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # --- Application workload --------------------------------------------------
+
+  # One-shot schema migration job: same image, owner role. Runs to completion
+  # before the API starts; re-running it is a no-op once migrations are applied.
+  ecommerce-migrate:
+    image: cop/ecommerce-api:dev
+    # Local image only. "cop/..." is an unclaimed Docker Hub namespace: pulling it
+    # could fetch someone else's image and hand it the owner password.
+    pull_policy: never
+    command: ["node", "src/migrate.js"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      PGHOST: postgres
+      PGDATABASE: ecommerce
+      PGUSER: ecommerce_owner
+      PGPASSWORD: ${ECOMMERCE_OWNER_PASSWORD:?set ECOMMERCE_OWNER_PASSWORD in .env}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+    logging: *logging
+
+  ecommerce-api:
+    build: ./apps/ecommerce-api
+    image: cop/ecommerce-api:dev
+    pull_policy: build   # always built locally, never pulled (see ecommerce-migrate)
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PGHOST: postgres
+      PGDATABASE: ecommerce
+      PGUSER: ecommerce_app
+      PGPASSWORD: ${ECOMMERCE_APP_PASSWORD:?set ECOMMERCE_APP_PASSWORD in .env}
+      REDIS_URL: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+    ports:
+      - "127.0.0.1:8080:3000"
+    # Hardening: read-only root filesystem, no Linux capabilities, no privilege escalation.
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:3000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      ecommerce-migrate:
+        condition: service_completed_successfully
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+    logging: *logging
+
+  # Shared by the e-commerce API now and the incident service in Phase 5 (separate
+  # databases and roles). Not published to the host.
+  postgres:
+    image: postgres:18.6-alpine3.24@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}
+      ECOMMERCE_OWNER_PASSWORD: ${ECOMMERCE_OWNER_PASSWORD:?set ECOMMERCE_OWNER_PASSWORD in .env}
+      ECOMMERCE_APP_PASSWORD: ${ECOMMERCE_APP_PASSWORD:?set ECOMMERCE_APP_PASSWORD in .env}
+    volumes:
+      - postgres-data:/var/lib/postgresql
+      - ./database/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      # -h 127.0.0.1 checks TCP. The default Unix socket is already up during first-boot
+      # init (temporary server, listen_addresses=''), when clients over TCP still fail.
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+  # Cache only: no persistence, LRU eviction at 64 MB. The password is fed on stdin
+  # so it never appears in the redis-server process arguments.
+  redis:
+    image: redis:8.8.4-alpine3.23@sha256:ab669f1420eaa05360a417b24f3bd210c9272e2c79a4bb35d3e50b4bfd50dbee
+    user: redis
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      REDISCLI_AUTH: ${REDIS_PASSWORD}
+    command:
+      - sh
+      - -c
+      - printf 'requirepass %s\n' "$$REDIS_PASSWORD" | exec redis-server - --save '' --appendonly no --maxmemory 64mb --maxmemory-policy allkeys-lru
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli ping | grep -q PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
   # --- Observability stack ---------------------------------------------------
 
   prometheus:
@@ -203,6 +304,17 @@ services:
       floci:
         condition: service_healthy
 
+  k6:
+    image: grafana/k6:1.8.2@sha256:00fdcebafbc86cb0137d429529b1caa401a02e09025f02fc74866fa6e2b004d8
+    profiles: [tools]
+    environment:
+      BASE_URL: http://ecommerce-api:3000
+    volumes:
+      - ./tests/load:/scripts:ro
+    depends_on:
+      ecommerce-api:
+        condition: service_healthy
+
   terraform:
     image: hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3
     profiles: [tools]
@@ -226,3 +338,4 @@ volumes:
   loki-data:
   alloy-data:
   grafana-data:
+  postgres-data:

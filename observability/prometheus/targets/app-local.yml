@@ -1,0 +1,4 @@
+- targets: [ecommerce-api:3000]
+  labels:
+    environment: local
+    service: ecommerce-api

@@ -1,0 +1,6 @@
+# host:port that must accept TCP connections.
+- targets:
+    - postgres:5432
+    - redis:6379
+  labels:
+    environment: local

@@ -13,6 +13,15 @@ discovery.docker "containers" {
 discovery.relabel "containers" {
 	targets = []
 
+	// Images built by Compose carry the project/service labels, so a plain
+	// `docker run cop/ecommerce-api:dev` (debugging, experiments) would also pass the
+	// project filter and pose as the real service. Only Compose-named containers count.
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/cop-.+"
+		action        = "keep"
+	}
+
 	rule {
 		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
 		target_label  = "service"

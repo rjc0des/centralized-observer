@@ -2,26 +2,7 @@
 # Integration test for the running stack: metrics collection, log ingestion,
 # log redaction and Grafana datasources. Needs `make up` first. Exit 1 on any failure.
 set -uo pipefail
-cd "$(dirname "$0")/../.."
-[ -f .env ] && set -a && source .env && set +a
-
-PROM=http://127.0.0.1:9090
-LOKI=http://127.0.0.1:3100
-GRAFANA=http://127.0.0.1:3000
-PROBE_IMAGE=alpine:3.20@sha256:d9e853e87e55526f6b2917df91a2115c36dd7c696a35be12163d44e6e2a4b6bc
-
-fail=0
-pass() { printf '  PASS  %s\n' "$*"; }
-bad()  { printf '  FAIL  %s\n' "$*"; fail=1; }
-
-# Number of series returned by a PromQL instant query.
-prom_count() { curl -fsS -G "$PROM/api/v1/query" --data-urlencode "query=$1" | jq '.data.result | length'; }
-# All log lines matching a LogQL query in the last 10 minutes, as JSON [{labels, line}].
-loki_lines() {
-  curl -fsS -G "$LOKI/loki/api/v1/query_range" --data-urlencode "query=$1" \
-    --data-urlencode "start=$(( $(date +%s) - 600 ))000000000" --data-urlencode "limit=100" |
-    jq -c '[.data.result[] | .stream as $s | .values[] | {labels: $s, line: .[1]}]'
-}
+source "$(dirname "$0")/lib.sh"
 
 echo "== Metrics"
 # Targets need one scrape interval after startup; wait up to 60s for all to be up.
@@ -54,7 +35,7 @@ for _ in $(seq 1 12); do
   sleep 5
 done
 probes=$(prom_count 'probe_success')
-[ "${probes:-0}" -gt 0 ] && [ -z "$failing" ] && pass "all $probes Blackbox HTTP probes succeed" || bad "probes failing: ${failing:-none collected}"
+[ "${probes:-0}" -gt 0 ] && [ -z "$failing" ] && pass "all $probes Blackbox probes succeed (HTTP + TCP)" || bad "probes failing: ${failing:-none collected}"
 
 echo "== Logs"
 marker="cop-test-$(date +%s)-$RANDOM"
@@ -114,6 +95,4 @@ done
 uptime=$(curl -fsS "${auth[@]}" "$GRAFANA/api/datasources/proxy/uid/alertmanager/api/v2/status" 2>/dev/null | jq -r '.uptime // empty')
 [ -n "$uptime" ] && pass "datasource alertmanager reachable via Grafana proxy" || bad "datasource alertmanager: request failed"
 
-echo
-[ $fail -eq 0 ] && echo "ALL PASSED" || echo "FAILURES ABOVE"
-exit $fail
+finish

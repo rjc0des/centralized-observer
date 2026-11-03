@@ -44,6 +44,11 @@ scrape_configs:
     file_sd_configs:
       - files: [/etc/prometheus/targets/cadvisor*.yml]
 
+  # Application /metrics endpoints; each target file sets a `service` label.
+  - job_name: apps
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/app*.yml]
+
   # Synthetic uptime checks: each target URL is probed through Blackbox Exporter.
   - job_name: blackbox-http
     metrics_path: /probe
@@ -51,10 +56,19 @@ scrape_configs:
       module: [http_2xx]
     file_sd_configs:
       - files: [/etc/prometheus/targets/probe-http*.yml]
-    relabel_configs:
+    relabel_configs: &blackbox-relabel
       - source_labels: [__address__]
         target_label: __param_target
       - source_labels: [__param_target]
         target_label: instance
       - target_label: __address__
         replacement: blackbox:9115
+
+  # TCP reachability of stateful dependencies (is the port accepting connections?).
+  - job_name: blackbox-tcp
+    metrics_path: /probe
+    params:
+      module: [tcp_connect]
+    file_sd_configs:
+      - files: [/etc/prometheus/targets/probe-tcp*.yml]
+    relabel_configs: *blackbox-relabel
