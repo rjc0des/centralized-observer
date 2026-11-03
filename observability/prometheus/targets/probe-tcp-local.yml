@@ -1,6 +1,10 @@
-# host:port that must accept TCP connections.
-- targets:
-    - postgres:5432
-    - redis:6379
+# host:port that must accept TCP connections. `dependency` matches the API's
+# dependency_up label, so alerts can combine both views of the same dependency.
+- targets: [postgres:5432]
   labels:
     environment: local
+    dependency: postgres
+- targets: [redis:6379]
+  labels:
+    environment: local
+    dependency: redis

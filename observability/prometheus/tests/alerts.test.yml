@@ -1,0 +1,395 @@
+# promtool unit tests for rules/*.yml (run by `make unit`). Every alert has a case
+# that fires and a near miss that must not (below threshold, too little traffic,
+# filtered filesystem...). Series values: 'a+bxN' = a, a+b, ... N more steps.
+rule_files:
+  - ../rules/alerts.yml
+  - ../rules/slo.yml
+
+evaluation_interval: 15s
+
+tests:
+  - name: host resources
+    interval: 1m
+    input_series:
+      # Idle counter +6/min on one CPU = 10% idle = 90% busy; the other host is 70% busy.
+      - series: 'node_cpu_seconds_total{mode="idle",cpu="0",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '0+6x20'
+      - series: 'node_cpu_seconds_total{mode="idle",cpu="0",environment="test",host="ok",instance="ok:9100",job="node"}'
+        values: '0+18x20'
+      - series: 'node_memory_MemAvailable_bytes{environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '5x20'
+      - series: 'node_memory_MemTotal_bytes{environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '100x20'
+      - series: 'node_memory_MemAvailable_bytes{environment="test",host="ok",instance="ok:9100",job="node"}'
+        values: '50x20'
+      - series: 'node_memory_MemTotal_bytes{environment="test",host="ok",instance="ok:9100",job="node"}'
+        values: '100x20'
+      # sda: 10% free, mounted twice (one alert, not two). sdb: 3% free (warning and
+      # critical). tmpfs at 1% is ignored.
+      - series: 'node_filesystem_avail_bytes{device="sda",fstype="ext4",mountpoint="/",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '10x20'
+      - series: 'node_filesystem_size_bytes{device="sda",fstype="ext4",mountpoint="/",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '100x20'
+      - series: 'node_filesystem_avail_bytes{device="sda",fstype="ext4",mountpoint="/var/lib/docker",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '10x20'
+      - series: 'node_filesystem_size_bytes{device="sda",fstype="ext4",mountpoint="/var/lib/docker",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '100x20'
+      - series: 'node_filesystem_avail_bytes{device="sdb",fstype="xfs",mountpoint="/data",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '3x20'
+      - series: 'node_filesystem_size_bytes{device="sdb",fstype="xfs",mountpoint="/data",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '100x20'
+      - series: 'node_filesystem_avail_bytes{device="tmpfs",fstype="tmpfs",mountpoint="/run",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '1x20'
+      - series: 'node_filesystem_size_bytes{device="tmpfs",fstype="tmpfs",mountpoint="/run",environment="test",host="busy",instance="busy:9100",job="node"}'
+        values: '100x20'
+    alert_rule_test:
+      - eval_time: 9m   # 90% busy since ~1m, but `for: 10m` not yet reached
+        alertname: HighCPUUsage
+        exp_alerts: []
+      - eval_time: 15m
+        alertname: HighCPUUsage
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, host: busy, instance: "busy:9100"}
+            exp_annotations:
+              summary: CPU at 90% on busy
+              description: Average CPU use across all cores has been above 85% for 10 minutes.
+      - eval_time: 15m
+        alertname: HighMemoryUsage
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, host: busy, instance: "busy:9100", job: node}
+            exp_annotations:
+              summary: Memory at 95% on busy
+              description: Less than 10% of memory has been available for 10 minutes.
+      - eval_time: 10m
+        alertname: DiskSpaceLow
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, host: busy, instance: "busy:9100", device: sda}
+            exp_annotations:
+              summary: 10.0% disk free on busy (sda)
+              description: Less than 15% free. Prometheus, Loki and Postgres data live on this host's disk.
+          - exp_labels: {severity: warning, environment: test, host: busy, instance: "busy:9100", device: sdb}
+            exp_annotations:
+              summary: 3.0% disk free on busy (sdb)
+              description: Less than 15% free. Prometheus, Loki and Postgres data live on this host's disk.
+          - exp_labels: {severity: critical, environment: test, host: busy, instance: "busy:9100", device: sdb}
+            exp_annotations:
+              summary: 3.0% disk free on busy (sdb)
+              description: Less than 5% free. Writes will soon fail; free space or grow the volume now.
+
+  - name: scrape targets down
+    interval: 1m
+    input_series:
+      - series: 'up{job="node",environment="test",host="h1",instance="h1:9100"}'
+        values: '1 1 0x10'
+      - series: 'up{job="apps",environment="test",service="shop",instance="shop:3000"}'
+        values: '1 1 0x10'
+      - series: 'up{job="loki",instance="loki:3100"}'
+        values: '1 1 0x10'
+      - series: 'up{job="grafana",instance="grafana:3000"}'
+        values: '1x12'
+    alert_rule_test:
+      - eval_time: 2m   # down for 0m: pending, not firing
+        alertname: InstanceDown
+        exp_alerts: []
+      - eval_time: 4m
+        alertname: InstanceDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: node, environment: test, host: h1, instance: "h1:9100"}
+            exp_annotations:
+              summary: Host h1 is unreachable
+              description: "Node Exporter on h1:9100 has not answered scrapes for 1 minute: the host or its exporter is down."
+      - eval_time: 4m
+        alertname: ApplicationDown
+        exp_alerts:
+          - exp_labels: {severity: critical, job: apps, environment: test, service: shop, instance: "shop:3000"}
+            exp_annotations:
+              summary: shop is down
+              description: shop:3000 has not answered metrics scrapes for 1 minute.
+      # Fires for every target, including node and apps; Alertmanager inhibits those two.
+      - eval_time: 5m
+        alertname: PrometheusTargetMissing
+        exp_alerts:
+          - exp_labels: {severity: warning, job: node, environment: test, host: h1, instance: "h1:9100"}
+            exp_annotations: {summary: "Scrape target node/h1:9100 is down", description: "Prometheus has not been able to scrape this target for 2 minutes; its metrics are missing."}
+          - exp_labels: {severity: warning, job: apps, environment: test, service: shop, instance: "shop:3000"}
+            exp_annotations: {summary: "Scrape target apps/shop:3000 is down", description: "Prometheus has not been able to scrape this target for 2 minutes; its metrics are missing."}
+          - exp_labels: {severity: warning, job: loki, instance: "loki:3100"}
+            exp_annotations: {summary: "Scrape target loki/loki:3100 is down", description: "Prometheus has not been able to scrape this target for 2 minutes; its metrics are missing."}
+
+  - name: endpoint probes
+    interval: 1m
+    input_series:
+      - series: 'probe_success{job="blackbox-http",environment="test",instance="http://floci:4566/_floci/init"}'
+        values: '1 0x10'
+      # Fails for 1 minute only (a restart): must not fire.
+      - series: 'probe_success{job="blackbox-http",environment="test",instance="http://grafana:3000/api/health"}'
+        values: '1 0 1x9'
+      # TCP probes are DatabaseUnavailable/RedisUnavailable's business.
+      - series: 'probe_success{job="blackbox-tcp",environment="test",instance="redis:6379",dependency="redis"}'
+        values: '1 0x10'
+    alert_rule_test:
+      - eval_time: 1m45s   # both failing, neither for 2 minutes yet
+        alertname: EndpointDown
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: EndpointDown
+        exp_alerts:
+          - exp_labels: {severity: warning, job: blackbox-http, environment: test, instance: "http://floci:4566/_floci/init"}
+            exp_annotations:
+              summary: http://floci:4566/_floci/init is failing its HTTP check
+              description: Blackbox Exporter has had no 2xx answer from this URL for 2 minutes.
+
+  - name: http errors and latency
+    interval: 1m
+    input_series:
+      # shop: 2 req/s, 5% 5xx, 10% slower than 0.5s.
+      - series: 'http_requests_total{status_code="200",route="/x",environment="test",service="shop"}'
+        values: '0+114x20'
+      - series: 'http_requests_total{status_code="500",route="/x",environment="test",service="shop"}'
+        values: '0+6x20'
+      - series: 'http_request_duration_seconds_bucket{le="0.1",environment="test",service="shop"}'
+        values: '0+80x20'
+      - series: 'http_request_duration_seconds_bucket{le="0.5",environment="test",service="shop"}'
+        values: '0+108x20'
+      - series: 'http_request_duration_seconds_bucket{le="1.0",environment="test",service="shop"}'
+        values: '0+120x20'
+      - series: 'http_request_duration_seconds_bucket{le="+Inf",environment="test",service="shop"}'
+        values: '0+120x20'
+      - series: 'http_request_duration_seconds_count{environment="test",service="shop"}'
+        values: '0+120x20'
+      # quiet: worse error and latency ratios (p95 0.85s) but only 0.2 req/s (below the 0.5 floor).
+      - series: 'http_requests_total{status_code="200",route="/x",environment="test",service="quiet"}'
+        values: '0+10x20'
+      - series: 'http_requests_total{status_code="500",route="/x",environment="test",service="quiet"}'
+        values: '0+2x20'
+      - series: 'http_request_duration_seconds_bucket{le="0.5",environment="test",service="quiet"}'
+        values: '0+10x20'
+      - series: 'http_request_duration_seconds_bucket{le="1.0",environment="test",service="quiet"}'
+        values: '0+12x20'
+      - series: 'http_request_duration_seconds_bucket{le="+Inf",environment="test",service="quiet"}'
+        values: '0+12x20'
+      - series: 'http_request_duration_seconds_count{environment="test",service="quiet"}'
+        values: '0+12x20'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: HighHTTPErrorRate
+        exp_alerts: []
+      - eval_time: 10m
+        alertname: HighHTTPErrorRate
+        exp_alerts:
+          - exp_labels: {severity: critical, environment: test, service: shop}
+            exp_annotations:
+              summary: "shop: 5% of requests fail with 5xx"
+              description: More than 1% of requests have returned 5xx for 5 minutes (at 0.5 req/s or more).
+      - eval_time: 15m
+        alertname: HighRequestLatency
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, service: shop}
+            exp_annotations:
+              # 90% under 0.5s, 100% under 1s: p95 interpolates to 0.75s.
+              summary: "shop: p95 latency 750ms"
+              description: The 95th percentile request duration has been above 500ms for 10 minutes.
+
+  - name: dependencies
+    interval: 1m
+    input_series:
+      # Postgres: the API is down (no dependency_up), only the TCP probe sees the outage.
+      - series: 'probe_success{dependency="postgres",environment="test",job="blackbox-tcp",instance="postgres:5432"}'
+        values: '1 0x10'
+      # Redis: the API reports it down, the TCP probe still connects.
+      - series: 'dependency_up{dependency="redis",environment="test",service="shop",job="apps",instance="shop:3000"}'
+        values: '1 0x10'
+      - series: 'probe_success{dependency="redis",environment="test",job="blackbox-tcp",instance="redis:6379"}'
+        values: '1x10'
+      # Another environment where both are fine.
+      - series: 'dependency_up{dependency="postgres",environment="other",service="shop",job="apps",instance="shop:3000"}'
+        values: '1x10'
+      - series: 'dependency_up{dependency="redis",environment="other",service="shop",job="apps",instance="shop:3000"}'
+        values: '1x10'
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: DatabaseUnavailable
+        exp_alerts:
+          - exp_labels: {severity: critical, environment: test}
+            exp_annotations:
+              summary: Postgres is unavailable
+              description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (503).
+      - eval_time: 3m
+        alertname: RedisUnavailable
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test}
+            exp_annotations:
+              summary: Redis is unavailable
+              description: The product cache is down. The API still works (degraded), reading products from Postgres.
+
+  - name: container restarts
+    interval: 1m
+    input_series:
+      - series: 'container_start_time_seconds{name="cop-crashy-1",environment="test",host="h1",id="/docker/a"}'
+        values: '100 100 200 300 400 400 400'
+      # Restarted once (as make test does to the API): no alert.
+      - series: 'container_start_time_seconds{name="cop-restarted-1",environment="test",host="h1",id="/docker/b"}'
+        values: '100 100 200 200 200 200 200'
+      # Recreated container: a new id is a new series, not a restart.
+      - series: 'container_start_time_seconds{name="cop-recreated-1",environment="test",host="h1",id="/docker/c"}'
+        values: '100 100 _ _ _ _ _'
+      - series: 'container_start_time_seconds{name="cop-recreated-1",environment="test",host="h1",id="/docker/d"}'
+        values: '_ _ 200 200 200 200 200'
+    alert_rule_test:
+      - eval_time: 6m
+        alertname: ContainerRestarting
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, host: h1, name: cop-crashy-1}
+            exp_annotations:
+              summary: Container cop-crashy-1 restarted 3 times in 15 minutes
+              description: 'Likely a crash loop. Check its logs: {container="cop-crashy-1"} in Loki.'
+
+  - name: loki ingestion
+    interval: 1m
+    input_series:
+      - series: 'loki_write_dropped_entries_total{job="alloy",instance="alloy:12345",reason="ingester_error"}'
+        values: '0 0 0 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5 5'
+      - series: 'loki_discarded_samples_total{job="loki",instance="loki:3100",reason="too_far_behind"}'
+        values: '0x20'
+      # Retries for 2 minutes (a Loki restart), then 8 minutes later for 7 minutes.
+      - series: 'loki_write_batch_retries_total{job="alloy",instance="alloy:12345"}'
+        values: '0 3 6 6 6 6 6 6 6 6 6 9 12 15 18 21 24 27 27 27'
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: LokiIngestionFailure
+        exp_alerts:
+          - exp_labels: {severity: critical, job: alloy, instance: "alloy:12345"}
+            exp_annotations:
+              summary: "Log lines lost: 5 dropped or rejected (alloy)"
+              description: Log entries were dropped by Alloy or rejected by Loki in the last 5 minutes. They are not recoverable.
+      - eval_time: 10m  # drops left the 5m window; the short retry burst never lasted 5m
+        alertname: LokiIngestionFailure
+        exp_alerts: []
+      - eval_time: 17m
+        alertname: LokiIngestionFailure
+        exp_alerts:
+          - exp_labels: {severity: warning, job: alloy, instance: "alloy:12345"}
+            exp_annotations:
+              summary: Alloy has been retrying log pushes to Loki for 5 minutes
+              description: Logs are buffered in Alloy and arrive late; they are dropped if Loki doesn't recover.
+
+  - name: monitoring storage
+    interval: 1m
+    input_series:
+      - series: 'prometheus_tsdb_storage_blocks_bytes{job="prometheus",instance="p1"}'
+        values: '3500x20'
+      - series: 'prometheus_tsdb_wal_storage_size_bytes{job="prometheus",instance="p1"}'
+        values: '500x20'
+      - series: 'prometheus_tsdb_head_chunks_storage_size_bytes{job="prometheus",instance="p1"}'
+        values: '300x20'
+      - series: 'prometheus_tsdb_retention_limit_bytes{job="prometheus",instance="p1"}'
+        values: '5000x20'
+      # No size limit configured (0): must not divide into an alert.
+      - series: 'prometheus_tsdb_storage_blocks_bytes{job="prometheus",instance="p2"}'
+        values: '3500x20'
+      - series: 'prometheus_tsdb_wal_storage_size_bytes{job="prometheus",instance="p2"}'
+        values: '500x20'
+      - series: 'prometheus_tsdb_head_chunks_storage_size_bytes{job="prometheus",instance="p2"}'
+        values: '300x20'
+      - series: 'prometheus_tsdb_retention_limit_bytes{job="prometheus",instance="p2"}'
+        values: '0x20'
+    alert_rule_test:
+      - eval_time: 16m
+        alertname: MonitoringStoragePressure
+        exp_alerts:
+          - exp_labels: {severity: warning, job: prometheus, instance: p1}
+            exp_annotations:
+              summary: Prometheus storage at 86% of its size limit
+              description: Above 80% of PROMETHEUS_RETENTION_SIZE. Old metrics will be deleted early, shortening SLO windows. Loki shares the host disk (see DiskSpaceLow).
+
+  - name: slo burn rates
+    interval: 1m
+    input_series:
+      # shop: a new service at 2 req/s with 5% errors (50x the 0.1% budget).
+      - series: 'http_requests_total{status_code="200",environment="test",service="shop"}'
+        values: '0+114x60'
+      - series: 'http_requests_total{status_code="500",environment="test",service="shop"}'
+        values: '0+6x60'
+      # tested: an otherwise idle service hit by one `make test` run at minute 2
+      # (~60 requests, 5 of them 500s). 8% errors, but far below the traffic floor.
+      - series: 'http_requests_total{status_code="200",environment="test",service="tested"}'
+        values: '0 0 52x28'
+      - series: 'http_requests_total{status_code="500",environment="test",service="tested"}'
+        values: '0 0 5x28'
+    alert_rule_test:
+      - eval_time: 5m
+        alertname: ErrorBudgetFastBurn
+        exp_alerts:
+          - exp_labels: {severity: critical, environment: test, service: shop, slo: availability}
+            exp_annotations:
+              summary: "shop availability SLO: error budget burning fast"
+              description: "5% of events failed the SLO in the last hour: over 14.4x the budget rate, which empties a 30-day budget in about 2 days."
+      # rate() divides by the whole window: 0.1 req/s over 6h needs 2160 requests,
+      # which shop reaches at 18m; then `for: 15m`.
+      - eval_time: 30m
+        alertname: ErrorBudgetSlowBurn
+        exp_alerts: []
+      - eval_time: 40m
+        alertname: ErrorBudgetSlowBurn
+        exp_alerts:
+          - exp_labels: {severity: warning, environment: test, service: shop, slo: availability}
+            exp_annotations:
+              summary: "shop availability SLO: error budget burning"
+              description: "5% of events failed the SLO in the last 6 hours: over 6x the budget rate, which empties a 30-day budget in 5 days."
+
+  - name: slo error ratios
+    interval: 1m
+    input_series:
+      - series: 'http_request_duration_seconds_bucket{le="0.5",environment="test",service="shop"}'
+        values: '0+90x10'
+      - series: 'http_request_duration_seconds_count{environment="test",service="shop"}'
+        values: '0+100x10'
+      # No 5xx series has ever existed for this service.
+      - series: 'http_requests_total{status_code="200",environment="test",service="perfect"}'
+        values: '0+60x10'
+    promql_expr_test:
+      - expr: slo:error_ratio:rate5m{slo="latency"}
+        eval_time: 6m
+        exp_samples:
+          - labels: 'slo:error_ratio:rate5m{slo="latency",environment="test",service="shop"}'
+            value: 1.0000000000000009E-01   # 0.1 (float rounding)
+      - expr: slo:error_ratio:rate5m{slo="availability"}
+        eval_time: 6m
+        exp_samples:
+          - labels: 'slo:error_ratio:rate5m{slo="availability",environment="test",service="perfect"}'
+            value: 0
+
+  # Freshness indicator, 15s steps (rate()[1m] needs several samples). Alloy and Loki
+  # up throughout; Alloy retries during 5:00-6:45; pushes over 60s during 10:00-11:45.
+  - name: freshness while alloy runs
+    interval: 15s
+    input_series:
+      - series: 'up{job="alloy",instance="alloy:12345"}'
+        values: '1x80'
+      - series: 'up{job="loki",instance="loki:3100"}'
+        values: '1x80'
+      - series: 'loki_write_batch_retries_total{job="alloy"}'
+        values: '0x19 1+1x7 8x52'
+      - series: 'loki_write_entry_propagation_latency_seconds_count{job="alloy"}'
+        values: '0+10x80'
+      - series: 'loki_write_entry_propagation_latency_seconds_bucket{le="60.0",job="alloy"}'
+        values: '0+10x39 399+9x7 472+10x32'
+    promql_expr_test:
+      - {expr: 'slo:freshness_bad:bool', eval_time: 4m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 0}]}
+      - {expr: 'slo:freshness_bad:bool', eval_time: 6m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 1}]}
+      - {expr: 'slo:freshness_bad:bool', eval_time: 9m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 0}]}
+      - {expr: 'slo:freshness_bad:bool', eval_time: 11m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 1}]}
+      - {expr: 'slo:freshness_bad:bool', eval_time: 14m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 0}]}
+
+  # Alloy down from minute 2: its own series are gone, only up{job="alloy"} remains.
+  - name: freshness while alloy is down
+    interval: 1m
+    input_series:
+      - series: 'up{job="alloy",instance="alloy:12345"}'
+        values: '1 1 0x10'
+      - series: 'up{job="loki",instance="loki:3100"}'
+        values: '1x12'
+    promql_expr_test:
+      - {expr: 'slo:freshness_bad:bool', eval_time: 1m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 0}]}
+      - {expr: 'slo:freshness_bad:bool', eval_time: 5m, exp_samples: [{labels: 'slo:freshness_bad:bool', value: 1}]}
+      - {expr: 'slo:error_ratio:rate5m{slo="freshness"}', eval_time: 10m, exp_samples: [{labels: 'slo:error_ratio:rate5m{slo="freshness"}', value: 1}]}

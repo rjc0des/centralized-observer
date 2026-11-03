@@ -3,6 +3,8 @@
 // --- Docker container logs (this compose project only) ---------------------
 discovery.docker "containers" {
 	host = "unix:///var/run/docker.sock"
+	// Default is 1m: a new or restarted container's first logs would wait up to a minute.
+	refresh_interval = "5s"
 
 	filter {
 		name   = "label"

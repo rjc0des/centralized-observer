@@ -1,7 +1,69 @@
-# ponytail: placeholder route so Alertmanager starts. Real routing, grouping,
-# inhibition and email/Slack receivers land in Phase 4 with the alert rules.
+# Template: render.sh fills the ${...} placeholders from the container environment
+# at start (Alertmanager can't read environment variables itself). Values come from
+# .env; when unset, email goes to Mailpit (http://127.0.0.1:8025) and Slack messages
+# to alert-sink, so routing works locally without real credentials.
+# Edits need `make reload` (re-renders, then reloads).
+global:
+  resolve_timeout: 5m
+  smtp_smarthost: "${SMTP_SMARTHOST}"
+  smtp_from: "${SMTP_FROM}"
+  smtp_auth_username: "${SMTP_AUTH_USERNAME}"
+  smtp_auth_password: "${SMTP_AUTH_PASSWORD}"
+  smtp_require_tls: ${SMTP_REQUIRE_TLS}
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+
+# critical -> webhook + email + Slack. Changes to the group (new alerts, recovery) go
+#             out within 1 minute; re-sent hourly while firing.
+# warning  -> webhook + Slack. Changes within 5 minutes; re-sent every 4 hours.
+# Every receiver sends recovery ("resolved") notifications.
 route:
-  receiver: "null"
+  receiver: warning
+  group_by: [alertname, environment]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  routes:
+    - matchers: [severity="critical"]
+      receiver: critical
+      group_interval: 1m
+      repeat_interval: 1h
+
+# Mute an alert while a higher-level alert already explains it. Labels listed in
+# `equal` must match; a label missing on both sides counts as matching.
+inhibit_rules:
+  # Critical twin of the same alert on the same target (e.g. DiskSpaceLow at 5% vs 15%).
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [alertname, environment, instance, device]
+  # The target-specific alert already says this target is down.
+  - source_matchers: [alertname=~"InstanceDown|ApplicationDown"]
+    target_matchers: [alertname="PrometheusTargetMissing"]
+    equal: [job, instance]
+  # Postgres down is the cause of the API's 5xx and its availability budget burn.
+  - source_matchers: [alertname="DatabaseUnavailable"]
+    target_matchers: [alertname=~"HighHTTPErrorRate|ErrorBudgetFastBurn|ErrorBudgetSlowBurn"]
+    equal: [environment]
+  # An app's failing health check is explained by the app or its database being down.
+  # Only probes labelled with a service (app health checks) are muted.
+  - source_matchers: [alertname=~"ApplicationDown|DatabaseUnavailable"]
+    target_matchers: [alertname="EndpointDown", service=~".+"]
+    equal: [environment]
 
 receivers:
-  - name: "null"
+  - name: critical
+    # ponytail: alert-sink only logs what it receives; the Phase 5 incident API takes
+    # over this webhook.
+    webhook_configs: &webhook
+      - url: http://alert-sink:8080/alertmanager
+        send_resolved: true
+    email_configs:
+      - to: "${ALERT_EMAIL_TO}"
+        send_resolved: true
+    slack_configs: &slack
+      - send_resolved: true
+        title: '{{ template "slack.default.title" . }}'
+        text: '{{ range .Alerts }}{{ .Annotations.summary }}{{ "\n" }}{{ end }}'
+
+  - name: warning
+    webhook_configs: *webhook
+    slack_configs: *slack

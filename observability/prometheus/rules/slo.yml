@@ -1,0 +1,116 @@
+# Service level objectives. Each SLI is recorded as an error ratio (bad / all events,
+# or bad / all time) labelled slo=<name>; the error budget is 1 - objective.
+#
+#   availability  ecommerce-api  99.9% of requests are not 5xx          budget 0.1%
+#   latency       ecommerce-api  95% of requests finish within 500 ms   budget 5%   (= p95 < 500ms)
+#   freshness     log pipeline   99% of the time logs reach Loki within 60s   budget 1% (7.2h / 30d)
+#
+# Windows: 30 days for the budget; 5m/30m/1h/6h for multi-window, multi-burn-rate
+# alerts (Google SRE workbook, ch. 5). A 30-day window needs 30 days of retention
+# (PROMETHEUS_RETENTION_TIME); with less data, rate() covers what exists, and the SLO
+# dashboard shows how much that is.
+#
+# A 5xx counter only exists after the first 5xx, so availability numerators fall back
+# to `0 * total`: no errors is an error ratio of 0, not a missing SLI.
+groups:
+  - name: slo-objectives
+    rules:
+      - record: slo:objective:ratio
+        expr: vector(0.999)
+        labels: {slo: availability}
+      - record: slo:objective:ratio
+        expr: vector(0.95)
+        labels: {slo: latency}
+      - record: slo:objective:ratio
+        expr: vector(0.99)
+        labels: {slo: freshness}
+
+  - name: slo-error-ratios
+    rules:
+      - record: slo:error_ratio:rate5m
+        labels: {slo: availability}
+        expr: (sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[5m])) or 0 * sum by (environment, service) (rate(http_requests_total[5m]))) / sum by (environment, service) (rate(http_requests_total[5m]))
+      - record: slo:error_ratio:rate30m
+        labels: {slo: availability}
+        expr: (sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[30m])) or 0 * sum by (environment, service) (rate(http_requests_total[30m]))) / sum by (environment, service) (rate(http_requests_total[30m]))
+      - record: slo:error_ratio:rate1h
+        labels: {slo: availability}
+        expr: (sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[1h])) or 0 * sum by (environment, service) (rate(http_requests_total[1h]))) / sum by (environment, service) (rate(http_requests_total[1h]))
+      - record: slo:error_ratio:rate6h
+        labels: {slo: availability}
+        expr: (sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[6h])) or 0 * sum by (environment, service) (rate(http_requests_total[6h]))) / sum by (environment, service) (rate(http_requests_total[6h]))
+
+      - record: slo:error_ratio:rate5m
+        labels: {slo: latency}
+        expr: 1 - sum by (environment, service) (rate(http_request_duration_seconds_bucket{le="0.5"}[5m])) / sum by (environment, service) (rate(http_request_duration_seconds_count[5m]))
+      - record: slo:error_ratio:rate30m
+        labels: {slo: latency}
+        expr: 1 - sum by (environment, service) (rate(http_request_duration_seconds_bucket{le="0.5"}[30m])) / sum by (environment, service) (rate(http_request_duration_seconds_count[30m]))
+      - record: slo:error_ratio:rate1h
+        labels: {slo: latency}
+        expr: 1 - sum by (environment, service) (rate(http_request_duration_seconds_bucket{le="0.5"}[1h])) / sum by (environment, service) (rate(http_request_duration_seconds_count[1h]))
+      - record: slo:error_ratio:rate6h
+        labels: {slo: latency}
+        expr: 1 - sum by (environment, service) (rate(http_request_duration_seconds_bucket{le="0.5"}[6h])) / sum by (environment, service) (rate(http_request_duration_seconds_count[6h]))
+
+      # Freshness is time-based: 1 while logs are not reaching Loki within 60s, else 0.
+      # Alloy's push latency alone can't be the SLI: it is timed from when Alloy *reads*
+      # a line, so lines written while Alloy is down (measured: 150s late) still count
+      # as fresh. Bad when Alloy or Loki is down, Alloy is retrying pushes, or a push
+      # took over 60s. While Alloy is down its own series vanish: `or vector(0)` keeps
+      # the indicator from vanishing with them. Prometheus downtime is not counted.
+      - record: slo:freshness_bad:bool
+        expr: |
+          max(1 - up{job=~"alloy|loki"})
+            + ((sum(rate(loki_write_batch_retries_total[1m])) > bool 0) or vector(0))
+            + ((sum(rate(loki_write_entry_propagation_latency_seconds_count[1m])) - sum(rate(loki_write_entry_propagation_latency_seconds_bucket{le="60.0"}[1m])) > bool 0) or vector(0))
+            > bool 0
+      # Freshness has no burn-rate alerts: LokiIngestionFailure covers a stalled pipeline.
+      - record: slo:error_ratio:rate5m
+        labels: {slo: freshness}
+        expr: avg_over_time(slo:freshness_bad:bool[5m])
+
+  # 30-day ratios change slowly and read 30 days of samples: evaluate once a minute.
+  - name: slo-budget
+    interval: 1m
+    rules:
+      - record: slo:error_ratio:rate30d
+        labels: {slo: availability}
+        expr: (sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[30d])) or 0 * sum by (environment, service) (rate(http_requests_total[30d]))) / sum by (environment, service) (rate(http_requests_total[30d]))
+      - record: slo:error_ratio:rate30d
+        labels: {slo: latency}
+        expr: 1 - sum by (environment, service) (rate(http_request_duration_seconds_bucket{le="0.5"}[30d])) / sum by (environment, service) (rate(http_request_duration_seconds_count[30d]))
+      - record: slo:error_ratio:rate30d
+        labels: {slo: freshness}
+        expr: avg_over_time(slo:freshness_bad:bool[30d])
+
+  # Burn rate = error ratio / budget. 14.4x spends 2% of a 30-day budget in 1 hour
+  # (page); 6x spends 5% in 6 hours (ticket). The short window makes the alert
+  # resolve soon after the errors stop. A traffic floor (0.1 req/s over the long
+  # window) keeps a quiet hour with one test run (5 deliberate 500s in ~60 requests)
+  # from paging; ApplicationDown and HighHTTPErrorRate still cover low traffic.
+  - name: slo-alerts
+    rules:
+      - alert: ErrorBudgetFastBurn
+        expr: |
+          slo:error_ratio:rate1h > on (slo) group_left 14.4 * (1 - slo:objective:ratio)
+          and slo:error_ratio:rate5m > on (slo) group_left 14.4 * (1 - slo:objective:ratio)
+          and on (environment, service) sum by (environment, service) (rate(http_requests_total[1h])) >= 0.1
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} {{ $labels.slo }} SLO: error budget burning fast"
+          description: "{{ $value | humanizePercentage }} of events failed the SLO in the last hour: over 14.4x the budget rate, which empties a 30-day budget in about 2 days."
+
+      - alert: ErrorBudgetSlowBurn
+        expr: |
+          slo:error_ratio:rate6h > on (slo) group_left 6 * (1 - slo:objective:ratio)
+          and slo:error_ratio:rate30m > on (slo) group_left 6 * (1 - slo:objective:ratio)
+          and on (environment, service) sum by (environment, service) (rate(http_requests_total[6h])) >= 0.1
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} {{ $labels.slo }} SLO: error budget burning"
+          description: "{{ $value | humanizePercentage }} of events failed the SLO in the last 6 hours: over 6x the budget rate, which empties a 30-day budget in 5 days."

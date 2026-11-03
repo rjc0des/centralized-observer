@@ -131,8 +131,12 @@ services:
     command:
       - --config.file=/etc/prometheus/prometheus.yml
       - --storage.tsdb.path=/prometheus
-      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-3d}
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION_TIME:-30d}
       - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-5GB}
+      - --enable-feature=expand-external-labels   # ${ENVIRONMENT} in external_labels
+      - --web.external-url=${PROMETHEUS_EXTERNAL_URL:-http://127.0.0.1:9090}   # links in alerts
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
     ports:
       - "127.0.0.1:9090:9090"
     volumes:
@@ -146,12 +150,23 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # render.sh fills alertmanager.yml's ${VAR}s from this environment, then starts
+  # Alertmanager. Unset values default to the local stand-ins below (Mailpit, alert-sink).
   alertmanager:
     image: prom/alertmanager:v0.34.2@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
+    entrypoint: [/bin/sh, /etc/alertmanager/render.sh]
     command:
-      - --config.file=/etc/alertmanager/alertmanager.yml
       - --storage.path=/alertmanager
       - --cluster.listen-address=   # single instance: no gossip port
+      - --web.external-url=${ALERTMANAGER_EXTERNAL_URL:-http://127.0.0.1:9093}   # links in notifications
+    environment:
+      SMTP_SMARTHOST: ${SMTP_SMARTHOST:-mailpit:1025}
+      SMTP_FROM: ${SMTP_FROM:-alertmanager@cop.local}
+      SMTP_AUTH_USERNAME: ${SMTP_AUTH_USERNAME:-}
+      SMTP_AUTH_PASSWORD: ${SMTP_AUTH_PASSWORD:-}
+      SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-false}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-oncall@cop.local}
+      SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-http://alert-sink:8080/slack}
     ports:
       - "127.0.0.1:9093:9093"
     volumes:
@@ -162,6 +177,37 @@ services:
       interval: 10s
       timeout: 3s
       retries: 5
+    restart: unless-stopped
+    logging: *logging
+
+  # Local stand-ins for notification receivers. Mailpit catches Alertmanager's email
+  # (inbox at http://127.0.0.1:8025, in memory, gone on restart); alert-sink logs
+  # webhook and Slack-format messages as JSON lines (docker compose logs alert-sink).
+  mailpit:
+    image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
+    user: "65534:65534"
+    read_only: true
+    tmpfs: [/tmp]
+    ports:
+      - "127.0.0.1:8025:8025"
+    restart: unless-stopped
+    logging: *logging
+
+  alert-sink:
+    image: python:3.14.9-alpine3.24@sha256:dbeb11d16bb95c3a7e3c25c842cb9f20cbc8c18f8be0461a4a0dcc861ad386a0
+    command: [python, /app/sink.py]
+    init: true   # python as PID 1 would ignore SIGTERM
+    user: "65534:65534"
+    read_only: true
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+    volumes:
+      - ./observability/alert-sink:/app:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/')"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
     restart: unless-stopped
     logging: *logging
 

@@ -82,7 +82,9 @@ tid=$(jq length <<<"$(loki_lines "{service=\"log-probe\"} | trace_id=\"trace-$ma
 curl -fsS "$LOKI/loki/api/v1/labels" | jq -e '.data | index("trace_id") | not' >/dev/null \
   && pass "trace_id is not an index label" || bad "trace_id became an index label (unbounded cardinality)"
 
-stack=$(loki_lines '{service="prometheus"}')
+# Prometheus logs mostly at startup, so look back to when its container started.
+started=$(docker inspect cop-prometheus-1 | jq -r '.[0].State.StartedAt | sub("\\..*"; "Z") | fromdate')
+stack=$(loki_lines '{service="prometheus"}' "$started")
 [ "$(jq length <<<"$stack")" -gt 0 ] && pass "stack container logs collected (service=prometheus)" || bad "no logs from prometheus container"
 
 echo "== Grafana"
@@ -94,5 +96,40 @@ done
 # The Alertmanager datasource has no health endpoint; query Alertmanager through Grafana's proxy.
 uptime=$(curl -fsS "${auth[@]}" "$GRAFANA/api/datasources/proxy/uid/alertmanager/api/v2/status" 2>/dev/null | jq -r '.uptime // empty')
 [ -n "$uptime" ] && pass "datasource alertmanager reachable via Grafana proxy" || bad "datasource alertmanager: request failed"
+
+echo "== Dashboards"
+# Labelled app counters only exist after the first request, and a cold-started API has
+# served none. Browse, order and look the order up, then wait until rate() sees it.
+kb=$(curl -fsS "$APP/products" | jq -r '.products[] | select(.sku == "KB-001") | .id'); curl -fsS -o /dev/null "$APP/products"
+body=$(printf '{"items":[{"product_id":"%s","quantity":1}]}' "$kb")
+oid=$(curl -fsS -X POST "$APP/orders" -H 'content-type: application/json' -d "$body" | jq -r .id)
+curl -fsS -o /dev/null "$APP/orders/$oid"
+# A new counter starts at 1, so its rate is 0: wait for the series, not for rate > 0.
+app_rates() { [ "$(prom_count 'rate(orders_total{service="ecommerce-api"}[1m])')" -gt 0 ]; }
+retry 12 5 app_rates || bad "shop requests never showed up in Prometheus; app panels would be empty"
+# The 30-day SLO rules run once a minute; right after a restart they may not have yet.
+slo_budgets() { [ "$(prom_count 'slo:error_ratio:rate30d')" -ge 3 ]; }
+retry 15 5 slo_budgets || bad "30-day SLO ratios not recorded after 75s"
+# Every panel query must parse and return data: a typo in a metric name doesn't error,
+# it just draws an empty panel. Panels documented "Empty when healthy." may be empty.
+# Grafana variables are replaced with what they expand to (all environments, 1m steps).
+panel_queries() { jq -r '.panels[] | select(.targets) | . as $p | .targets[] |
+  [$p.datasource.uid, ($p.description // "" | contains("Empty when healthy.")), $p.title,
+   (.expr | gsub("\\$environment"; ".*") | gsub("\\$__rate_interval|\\$__auto"; "1m"))] | @tsv' "$1"; }
+query_result() { # <datasource uid> <expr>: prints "error", or the number of series returned
+  if [ "$1" = loki ]; then curl -sS -G "$LOKI/loki/api/v1/query_range" --data-urlencode "query=$2" --data-urlencode "since=1h"
+  else curl -sS -G "$PROM/api/v1/query" --data-urlencode "query=$2"; fi | jq -r 'if .status == "success" then .data.result | length else "error" end' 2>/dev/null || echo error; }
+for f in observability/grafana/provisioning/dashboards/*.json; do
+  uid=$(jq -r .uid "$f"); title=$(jq -r .title "$f")
+  [ "$(curl -fsS "${auth[@]}" "$GRAFANA/api/dashboards/uid/$uid" 2>/dev/null | jq -r .dashboard.title)" = "$title" ] \
+    || { bad "dashboard $uid not provisioned in Grafana"; continue; }
+  total=0 failed=0
+  while IFS=$'\t' read -r ds empty_ok ptitle expr; do
+    total=$((total + 1)); n=$(query_result "$ds" "$expr")
+    why=; [ "$n" = error ] && why="query error"; [ "$n" = 0 ] && [ "$empty_ok" = false ] && why="no data"
+    [ -n "$why" ] && { failed=$((failed + 1)); bad "$uid / $ptitle: $why for: $expr"; }
+  done <<<"$(panel_queries "$f")"
+  [ "$failed" -eq 0 ] && pass "dashboard $uid provisioned, all $total queries valid and returning data"
+done
 
 finish

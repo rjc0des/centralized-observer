@@ -1,0 +1,188 @@
+# Alert rules. Severity routes the notification (alertmanager.yml):
+#   critical = email + Slack, warning = Slack. Both also go to the webhook receiver.
+#
+# Request-based alerts need a minimum volume: `make test` sends ~60 requests in about
+# a minute, 5 of them deliberate 500s and ~15 slower than 0.5s, so without a floor
+# every test run would page. 0.5 req/s = 150 requests per 5-minute window.
+# Unit tests: observability/prometheus/tests/alerts.test.yml (make unit).
+groups:
+  - name: hosts
+    rules:
+      - alert: HighCPUUsage
+        expr: 100 * (1 - avg by (environment, host, instance) (rate(node_cpu_seconds_total{mode="idle"}[5m]))) > 85
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU at {{ $value | printf \"%.0f\" }}% on {{ $labels.host }}"
+          description: Average CPU use across all cores has been above 85% for 10 minutes.
+
+      - alert: HighMemoryUsage
+        expr: 100 * (1 - node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) > 90
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Memory at {{ $value | printf \"%.0f\" }}% on {{ $labels.host }}"
+          description: Less than 10% of memory has been available for 10 minutes.
+
+      # One alert per disk (device), not per mountpoint: the same disk is often
+      # mounted at several paths. tmpfs and virtiofs (OrbStack's view of the Mac) are skipped.
+      - alert: DiskSpaceLow
+        expr: 100 * min by (environment, host, instance, device) (node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes) < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $value | printf \"%.1f\" }}% disk free on {{ $labels.host }} ({{ $labels.device }})"
+          description: Less than 15% free. Prometheus, Loki and Postgres data live on this host's disk.
+      - alert: DiskSpaceLow
+        expr: 100 * min by (environment, host, instance, device) (node_filesystem_avail_bytes{fstype=~"ext4|xfs|btrfs"} / node_filesystem_size_bytes) < 5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $value | printf \"%.1f\" }}% disk free on {{ $labels.host }} ({{ $labels.device }})"
+          description: Less than 5% free. Writes will soon fail; free space or grow the volume now.
+
+      - alert: InstanceDown
+        expr: up{job="node"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Host {{ $labels.host }} is unreachable"
+          description: "Node Exporter on {{ $labels.instance }} has not answered scrapes for 1 minute: the host or its exporter is down."
+
+  - name: applications
+    rules:
+      - alert: ApplicationDown
+        expr: up{job="apps"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} is down"
+          description: "{{ $labels.instance }} has not answered metrics scrapes for 1 minute."
+
+      # Blackbox HTTP checks: the only alert for endpoints Prometheus doesn't scrape
+      # (Floci, app health checks). For stack components it duplicates
+      # PrometheusTargetMissing from the outside, which also catches a component that
+      # still serves /metrics but reports itself not ready.
+      - alert: EndpointDown
+        expr: probe_success{job="blackbox-http"} == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.instance }} is failing its HTTP check"
+          description: Blackbox Exporter has had no 2xx answer from this URL for 2 minutes.
+
+      - alert: HighHTTPErrorRate
+        expr: |
+          sum by (environment, service) (rate(http_requests_total{status_code=~"5.."}[5m]))
+            / sum by (environment, service) (rate(http_requests_total[5m]))
+            > 0.01
+          and sum by (environment, service) (rate(http_requests_total[5m])) >= 0.5
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }}: {{ $value | humanizePercentage }} of requests fail with 5xx"
+          description: More than 1% of requests have returned 5xx for 5 minutes (at 0.5 req/s or more).
+
+      # Buckets include 0.5 exactly, so the p95 is not interpolated across the threshold.
+      - alert: HighRequestLatency
+        expr: |
+          histogram_quantile(0.95, sum by (environment, service, le) (rate(http_request_duration_seconds_bucket[5m]))) > 0.5
+          and sum by (environment, service) (rate(http_request_duration_seconds_count[5m])) >= 0.5
+        for: 10m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }}: p95 latency {{ $value | humanizeDuration }}"
+          description: The 95th percentile request duration has been above 500ms for 10 minutes.
+
+  # Two views of each dependency: the API's own check (dependency_up) and a Blackbox TCP
+  # probe, which still works when the API is down. Either one reporting 0 fires.
+  - name: dependencies
+    rules:
+      - alert: DatabaseUnavailable
+        expr: min by (environment) (dependency_up{dependency="postgres"} or probe_success{dependency="postgres"}) == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: Postgres is unavailable
+          description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (503).
+
+      - alert: RedisUnavailable
+        expr: min by (environment) (dependency_up{dependency="redis"} or probe_success{dependency="redis"}) == 0
+        for: 1m
+        labels:
+          severity: warning
+        annotations:
+          summary: Redis is unavailable
+          description: The product cache is down. The API still works (degraded), reading products from Postgres.
+
+  - name: containers
+    rules:
+      # cAdvisor keeps a container's series across restarts and updates its start
+      # time, so each restart it observes is one change. Recreated containers (new ID)
+      # don't count, and neither does a single restart (make test restarts the API once).
+      # ponytail: cAdvisor is sampled every 15s, so it misses runs shorter than that.
+      # Measured: a container crashing after 3s restarted 16 times in 8 minutes and was
+      # observed twice (this fired after ~6.5 minutes). Fast crash loops of the stack's
+      # services also fire ApplicationDown / PrometheusTargetMissing / *Unavailable.
+      # Exact counts need Docker's RestartCount (an exporter on the Docker socket).
+      - alert: ContainerRestarting
+        expr: sum by (environment, host, name) (changes(container_start_time_seconds{name!=""}[15m])) > 1
+        labels:
+          severity: warning
+        annotations:
+          summary: "Container {{ $labels.name }} restarted {{ $value }} times in 15 minutes"
+          description: "Likely a crash loop. Check its logs: {container=\"{{ $labels.name }}\"} in Loki."
+
+  - name: monitoring
+    rules:
+      - alert: PrometheusTargetMissing
+        expr: up == 0
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Scrape target {{ $labels.job }}/{{ $labels.instance }} is down"
+          description: Prometheus has not been able to scrape this target for 2 minutes; its metrics are missing.
+
+      # Logs lost: Alloy gave up on entries, or Loki rejected them (limits, too old).
+      - alert: LokiIngestionFailure
+        expr: |
+          sum by (environment, job, instance) (increase(loki_write_dropped_entries_total[5m])) > 0
+          or sum by (environment, job, instance) (increase(loki_discarded_samples_total[5m])) > 0
+        labels:
+          severity: critical
+        annotations:
+          summary: "Log lines lost: {{ $value | printf \"%.0f\" }} dropped or rejected ({{ $labels.job }})"
+          description: Log entries were dropped by Alloy or rejected by Loki in the last 5 minutes. They are not recoverable.
+      # Logs delayed: Alloy keeps retrying pushes to Loki (Loki down or erroring).
+      - alert: LokiIngestionFailure
+        expr: sum by (environment, job, instance) (rate(loki_write_batch_retries_total[2m])) > 0
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: Alloy has been retrying log pushes to Loki for 5 minutes
+          description: Logs are buffered in Alloy and arrive late; they are dropped if Loki doesn't recover.
+
+      # Size-based retention deletes the oldest data before the retention time is reached.
+      - alert: MonitoringStoragePressure
+        expr: |
+          (prometheus_tsdb_storage_blocks_bytes + prometheus_tsdb_wal_storage_size_bytes + prometheus_tsdb_head_chunks_storage_size_bytes)
+            / (prometheus_tsdb_retention_limit_bytes > 0)
+            > 0.8
+        for: 15m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Prometheus storage at {{ $value | humanizePercentage }} of its size limit"
+          description: Above 80% of PROMETHEUS_RETENTION_SIZE. Old metrics will be deleted early, shortening SLO windows. Loki shares the host disk (see DiskSpaceLow).
