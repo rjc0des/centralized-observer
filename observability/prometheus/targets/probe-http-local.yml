@@ -1,0 +1,10 @@
+# Each target is a URL Blackbox Exporter GETs; 2xx = up.
+- targets:
+    - http://prometheus:9090/-/ready
+    - http://alertmanager:9093/-/ready
+    - http://loki:3100/ready
+    - http://alloy:12345/-/ready
+    - http://grafana:3000/api/health
+    - http://floci:4566/_floci/init
+  labels:
+    environment: local

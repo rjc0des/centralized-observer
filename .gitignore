@@ -27,8 +27,8 @@ override.tf.json
 terraform.tfvars
 
 # Runtime data and backups
-backups/
-data/
+/backups/
+/data/
 *.dump
 *.sql.gz
 

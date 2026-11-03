@@ -1,0 +1,5 @@
+# Local host = the OrbStack Linux VM, not macOS.
+- targets: [node-exporter:9100]
+  labels:
+    environment: local
+    host: orbstack-vm

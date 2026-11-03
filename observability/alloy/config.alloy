@@ -1,0 +1,111 @@
+// Log pipeline: Docker containers + Linux system logs -> redact -> parse -> Loki.
+
+// --- Docker container logs (this compose project only) ---------------------
+discovery.docker "containers" {
+	host = "unix:///var/run/docker.sock"
+
+	filter {
+		name   = "label"
+		values = ["com.docker.compose.project=cop"]
+	}
+}
+
+discovery.relabel "containers" {
+	targets = []
+
+	rule {
+		source_labels = ["__meta_docker_container_label_com_docker_compose_service"]
+		target_label  = "service"
+	}
+
+	rule {
+		source_labels = ["__meta_docker_container_name"]
+		regex         = "/(.*)"
+		target_label  = "container"
+	}
+}
+
+loki.source.docker "containers" {
+	host          = "unix:///var/run/docker.sock"
+	targets       = discovery.docker.containers.targets
+	relabel_rules = discovery.relabel.containers.rules
+	forward_to    = [loki.process.logs.receiver]
+}
+
+// --- Linux system logs ------------------------------------------------------
+// Matches nothing inside OrbStack's VM (it has no syslog); active on EC2 Ubuntu.
+local.file_match "system" {
+	path_targets = [{
+		"__path__" = "/host/var/log/{syslog,kern.log,auth.log}",
+		"service"  = "system",
+	}]
+}
+
+loki.source.file "system" {
+	targets    = local.file_match.system.targets
+	forward_to = [loki.process.logs.receiver]
+}
+
+// --- Processing -------------------------------------------------------------
+loki.process "logs" {
+	forward_to = [loki.write.loki.receiver]
+
+	// 1. Redact secrets first, so nothing downstream ever sees them.
+	//    Each regex captures only the value; the capture is replaced.
+	stage.replace {
+		// JSON: "password": "value"
+		expression = "(?i)\"(?:password|passwd|pwd|secret|token|access_token|refresh_token|api_key|apikey|authorization|cookie|secret_key|access_key)\"\\s*:\\s*\"([^\"]*)\""
+		replace    = "[REDACTED]"
+	}
+
+	stage.replace {
+		// key=value (logfmt, query strings)
+		expression = "(?i)(?:password|passwd|pwd|secret|token|api_key|apikey|secret_key|access_key)=([^\\s&\"]+)"
+		replace    = "[REDACTED]"
+	}
+
+	stage.replace {
+		// Authorization: Bearer <token>
+		expression = "(?i)bearer\\s+([A-Za-z0-9._~+/=-]+)"
+		replace    = "[REDACTED]"
+	}
+
+	// 2. Extract level: logfmt (level=info) first, then JSON overrides it if present.
+	stage.regex {
+		expression = "level=\"?(?P<level>[A-Za-z]+)"
+	}
+
+	stage.json {
+		expressions = {
+			level    = "level",
+			trace_id = "trace_id",
+		}
+	}
+
+	// Allowlist + normalise: only these five values can ever become a label.
+	// Anything else (e.g. "battery level=high") yields "" and no level label.
+	stage.template {
+		source   = "level"
+		template = `{{ $l := ToLower .Value }}{{ if or (eq $l "debug") (eq $l "trace") }}debug{{ else if eq $l "info" }}info{{ else if or (eq $l "warn") (eq $l "warning") }}warn{{ else if or (eq $l "error") (eq $l "err") }}error{{ else if or (eq $l "fatal") (eq $l "critical") (eq $l "crit") (eq $l "panic") }}fatal{{ end }}`
+	}
+
+	// level is bounded (debug/info/warn/error/fatal) -> label.
+	// trace_id is unbounded -> structured metadata, never a label.
+	stage.labels {
+		values = {level = ""}
+	}
+
+	stage.structured_metadata {
+		values = {trace_id = ""}
+	}
+}
+
+loki.write "loki" {
+	endpoint {
+		url = "http://loki:3100/loki/api/v1/push"
+	}
+
+	external_labels = {
+		environment = sys.env("ENVIRONMENT"),
+	}
+}

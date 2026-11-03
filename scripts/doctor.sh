@@ -33,7 +33,7 @@ free=$(df -g . | awk 'NR==2 {print $4}')
 
 # A port is fine if free or already held by this project's own container.
 ours=$(docker compose ps --format '{{.Ports}}' 2>/dev/null)
-for port in ${FLOCI_PORT:-4566}; do
+for port in "${FLOCI_PORT:-4566}" 3000 3100 9090 9093 12345; do
   if ! lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then ok "port $port free"
   elif grep -q ":$port->" <<<"$ours"; then ok "port $port in use by this stack"
   else bad "port $port in use by another process"; fi

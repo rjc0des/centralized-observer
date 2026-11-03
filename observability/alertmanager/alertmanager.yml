@@ -1,0 +1,7 @@
+# ponytail: placeholder route so Alertmanager starts. Real routing, grouping,
+# inhibition and email/Slack receivers land in Phase 4 with the alert rules.
+route:
+  receiver: "null"
+
+receivers:
+  - name: "null"
