@@ -7,7 +7,7 @@ management for multiple applications, developed locally on OrbStack with
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 4 (alerting and SLOs).** Only what is listed under
+> **Status: Phase 5 (incident management).** Only what is listed under
 > "Working today" has been implemented and tested. The full README is written in Phase 9.
 
 ## Working today
@@ -16,6 +16,8 @@ Inspired by Uber Engineering's
 |---|---|---|---|
 | E-commerce API | Node.js `24.22.2`, Fastify `5.12.8` | http://127.0.0.1:8080 | Metrics, JSON logs, OTel trace IDs; non-root, read-only FS |
 | PostgreSQL | `18.6` | internal | `ecommerce` DB; owner role for migrations, row-only role for the API |
+| Incident API | Python `3.14.9`, FastAPI `0.162.0` | http://127.0.0.1:8081 | Alertmanager webhook → deduplicated, correlated incidents; lifecycle, reports. Docs at `/docs` |
+| incident-db | PostgreSQL `18.6` | internal | Separate instance, so incidents are recorded while the app database is down |
 | Redis | `8.8.4` | internal | Cache only: password, 64 MB LRU, no persistence |
 | Prometheus | `v3.15.1` | http://127.0.0.1:9090 | 15s scrape/eval, 30d / 5GB retention, file-based target discovery, alert + SLO rules |
 | Grafana | `13.2.5` | http://127.0.0.1:3000 | Datasources and 5 dashboards provisioned from Git; login from `.env` |
@@ -23,7 +25,7 @@ Inspired by Uber Engineering's
 | Alloy | `v1.21.3` | http://127.0.0.1:12345 | Docker + system logs → redact → parse → Loki |
 | Alertmanager | `v0.34.2` | http://127.0.0.1:9093 | Severity routing, grouping, inhibition; email + Slack + webhook |
 | Mailpit | `v1.31.6` | http://127.0.0.1:8025 | Local inbox for alert email (default SMTP target) |
-| alert-sink | Python `3.14.9` (stdlib) | internal | Logs webhook and Slack-format notifications (default Slack target) |
+| alert-sink | Python `3.14.9` (stdlib) | internal | Logs Slack-format notifications (default Slack target) |
 | Node Exporter | `v1.12.1` | internal | Host = OrbStack Linux VM locally |
 | cAdvisor | `v0.60.6` | internal | Per-container CPU, memory, network |
 | Blackbox Exporter | `v0.29.1` | internal | HTTP uptime probes + TCP probes (Postgres, Redis) |
@@ -119,11 +121,13 @@ Rules: [`alerts.yml`](observability/prometheus/rules/alerts.yml) and
 
 - **Routing:** critical → email + Slack + webhook (updates within 1m, repeat 1h);
   warning → Slack + webhook (repeat 4h). Grouped by `alertname, environment`.
+  The webhook is the [incident API](#incident-management).
   Every receiver gets recovery (`RESOLVED`) notifications.
 - **Inhibition:** a critical alert mutes its warning twin on the same disk/target;
   InstanceDown/ApplicationDown mute PrometheusTargetMissing for that target;
-  DatabaseUnavailable mutes HighHTTPErrorRate and the error-budget burn alerts;
-  ApplicationDown or DatabaseUnavailable mutes the app's failing `/health` check (EndpointDown).
+  DatabaseUnavailable (the e-commerce Postgres) mutes ecommerce-api's HighHTTPErrorRate,
+  error-budget burn alerts and failing `/health` check (EndpointDown), not other services';
+  ApplicationDown mutes the same service's failing `/health` check.
 - **Links** in notifications point to `PROMETHEUS_EXTERNAL_URL` / `ALERTMANAGER_EXTERNAL_URL`
   (default `http://127.0.0.1:9090` / `:9093`).
 - **Minimum traffic:** request-based alerts need ≥ 0.5 req/s (5m alerts) or ≥ 0.1 req/s
@@ -137,17 +141,106 @@ Rules: [`alerts.yml`](observability/prometheus/rules/alerts.yml) and
   [`render.sh`](observability/alertmanager/render.sh) fills them into its config at start.
 - **Tests:** `make unit` runs promtool unit tests (a firing case and a near miss for every
   alert) and validates both configs. `make test` stops Postgres and follows the real alert
-  through Alertmanager to the webhook, Slack-format and email receivers, checks every link
-  in the email opens, then checks the recovery notifications. With real email/Slack settings
+  through Alertmanager to an incident (opened while Postgres is still down), Slack-format
+  and email receivers, checks every link in the email opens, then checks the recovery
+  notifications and that the incident auto-resolved. With real email/Slack settings
   in `.env` that outage step is skipped (it would page people) and reported as `SKIP`.
   Running `make test` twice within 15 minutes fires ContainerRestarting (warning): each run
   restarts the API once.
+
+### Incident management
+
+[`apps/incident-api`](apps/incident-api) receives Alertmanager's webhook and turns alerts
+into incidents, stored in its own Postgres (`incident-db`).
+
+```
+Prometheus ─▶ Alertmanager ─▶ webhook (Bearer token) ─▶ incident API ─▶ incident-db
+                                                             │
+                     people: acknowledge / resolve / notes ──┘   reports, metrics
+```
+
+- **Deduplication.** One alert firing = `(fingerprint, startsAt)`, unique in the database.
+  Alertmanager re-sends notifications (every group change, and hourly/4-hourly while
+  firing); re-sends only update `last_received_at`. A notification for a fingerprint that
+  is still firing here belongs to that firing even with a new `startsAt` (Prometheus gives
+  a still-firing alert a new one after a restart). Resolved is final.
+- **Deterministic correlation.** A new alert joins the oldest unresolved incident in its
+  environment that has a related alert, else it opens a new one. The rule is written to
+  the timeline ([`correlation.py`](apps/incident-api/app/correlation.py)):
+
+  | Rule | Related when |
+  |---|---|
+  | `same-alert` | same alertname and service (e.g. DiskSpaceLow on two disks) |
+  | `same-service` | same `service` label (e.g. ApplicationDown + HighRequestLatency) |
+  | `database-down` | DatabaseUnavailable ↔ ecommerce-api's HighHTTPErrorRate, burn alerts, EndpointDown |
+  | `target-down` | InstanceDown/ApplicationDown ↔ PrometheusTargetMissing on the same job and instance |
+
+  The cause → symptom pairs are Alertmanager's inhibit rules. Alertmanager never sends a
+  muted symptom, so these rules matter when the symptom fired first or the cause resolves
+  before it. The report's **probable cause** is the earliest alert that a rule lists as a
+  cause, else the earliest alert. No AI or heuristics.
+- **Lifecycle:** `open → acknowledged → resolved` (or `open → resolved`). An incident
+  resolves itself when all its alerts have resolved; it can be resolved by hand earlier.
+  Invalid transitions answer 409. A later firing of the same alert opens a new incident.
+  Resolving and recording webhooks take the same lock, so an alert can't slip into an
+  incident while someone resolves it. An auto-resolved incident's end is its alerts'
+  latest end, whatever order the notifications arrived in.
+  Severity is the highest of its alerts; a raise is logged. The timeline is append-only:
+  the API's database role can insert events but not change or delete anything.
+- **Writes** (webhook, acknowledge, resolve, notes) need `Authorization: Bearer $INCIDENT_API_TOKEN`,
+  checked before the request body is read; people also give an `actor` name. An alert
+  without an `alertname` is skipped (and counted), not a reason to reject the whole
+  notification: Alertmanager never retries a 4xx, so that group would be lost.
+
+```bash
+source .env; A=http://127.0.0.1:8081
+curl -s "$A/incidents?status=open" | jq          # filters: status, environment, limit
+curl -s "$A/incidents/1" | jq                     # alerts + timeline
+curl -s -X POST -H "Authorization: Bearer $INCIDENT_API_TOKEN" -H 'content-type: application/json' \
+  "$A/incidents/1/acknowledge" -d '{"actor":"ana"}'
+curl -s -X POST ... "$A/incidents/1/notes" -d '{"actor":"ana","text":"failed over"}'
+curl -s -X POST ... "$A/incidents/1/resolve" -d '{"actor":"ana","note":"replaced disk"}'
+curl -s "$A/incidents/1/report"                   # Markdown: summary, probable cause, alerts, timeline
+curl -s "$A/reports/summary?days=30" | jq         # counts by severity, mean time to acknowledge / resolve
+```
+
+- **Lost resolutions.** Alertmanager keeps alerts in memory only. After a restart, an
+  alert that cleared meanwhile never gets a "resolved" notification, and its incident
+  stayed open (seen after `make down && make up`). Every 15 s the API compares its firing
+  alerts with Alertmanager's active ones (`/api/v2/alerts`, including silenced and
+  inhibited); one missing for 10 minutes is resolved, with a timeline note saying so.
+  10 minutes is longer than any `group_interval`, so a real resolved notification, with
+  the true end time, normally arrives first. If Alertmanager can't be reached, nothing is
+  decided.
+- **When incident-db is down** the webhook is still accepted (200) and written to a spool
+  volume, then recorded in order once the database is back (within 15 s, or by the next
+  webhook). Answering 503 wasn't enough: Alertmanager sends a receiver the "resolved"
+  notification only if it got the "firing" one, so an alert that fired and cleared during
+  the outage was lost (reproduced: Mailpit had both emails, the incident API nothing).
+  `/health` turns 503, which fires EndpointDown, and `incident_spool_pending` counts what
+  waits. Its own Postgres means the DatabaseUnavailable incident is recorded while the
+  app's database is down.
+- **Metrics:** `incidents_open{environment,severity}` (read at scrape time; Overview
+  dashboard; it shows "unknown", not 0, while the API or its database is down; severity is
+  limited to known values), `incident_webhook_alerts_total{outcome}`
+  (new/duplicate/resolved/skipped), `incident_spool_pending`, and the same
+  `http_requests_total` / `http_request_duration_seconds` as ecommerce-api. `/health` and
+  `/metrics` aren't counted, so webhooks are its only steady traffic: far below the HTTP
+  alerts' traffic floors. Its health is watched by ApplicationDown (scrape) and
+  EndpointDown (`/health`), not by the 5xx/latency alerts.
+- **Tests:** `make unit` tests the correlation rules and the report. `make test`
+  (`incidents.sh`, 59 checks) posts webhooks for auth, validation, deduplication, each
+  correlation rule with a control, the lifecycle, reports, the database role's limits,
+  reconciliation (with a control alert Alertmanager still has), an incident-db outage
+  (spooled webhooks recorded afterwards; panel shows unknown), a restart's new `startsAt`,
+  out-of-order resolutions, a resolve racing a webhook, and 20 concurrent related webhooks (a session holds inserts so they truly overlap: without
+  the webhook lock they made 20 incidents).
 
 ### SLOs
 
 | SLO | Objective | Bad event | Error budget (30d) |
 |---|---|---|---|
-| availability | 99.9% | ecommerce-api request returned 5xx | 0.1% of requests |
+| availability | 99.9% | an app request returned 5xx (health checks and scrapes don't count) | 0.1% of requests |
 | latency | 95% | request slower than 500 ms (i.e. p95 < 500 ms) | 5% of requests |
 | freshness | 99% of the time | logs not reaching Loki within 60 s: Alloy or Loki down, Alloy retrying, or a push > 60 s | 1% of the time (7.2 h) |
 
@@ -167,7 +260,7 @@ Provisioned read-only into Grafana's **COP** folder from
 
 | Dashboard | Shows |
 |---|---|
-| Overview | firing alerts, targets up, probes, availability budget left, traffic and 5xx by service |
+| Overview | firing alerts, open incidents, targets up, probes, availability budget left, traffic and 5xx by service |
 | Infrastructure | host CPU, memory, disk, load, I/O; container CPU, memory, network, restarts |
 | E-commerce API | rate, errors, latency (p50/p95/p99), dependencies, DB pool, cache, orders, logs |
 | SLOs and error budgets | objectives, 30-day SLIs, budget left, burn rate per window |
@@ -219,6 +312,9 @@ Alloy collects logs from every container in this compose project (and `/var/log/
 - **Locally built images are never pulled.** `cop/ecommerce-api` has `pull_policy: build`
   (API) and `never` (migrate job): the `cop` namespace is unclaimed on Docker Hub, so a pull
   could fetch someone else's image and hand it the database owner password. Tested by `make test`.
+- **Incident API:** every write needs the bearer token (Alertmanager sends it); reads are
+  open, fine on `127.0.0.1`. One shared token, and `actor` is whoever the caller says:
+  per-user authentication comes before anyone outside the team can reach it.
 - **Deferred to the AWS phase:** the API serves `/metrics` on its public port (fine on
   `127.0.0.1`, not behind a public load balancer), and secrets are environment variables
   (visible in `docker inspect`); both move behind a private port / AWS SSM in Phase 7.
@@ -245,6 +341,20 @@ Alloy collects logs from every container in this compose project (and `/var/log/
   `service "ecommerce-migrate" didn't complete successfully` (Compose may also print a
   misleading `dependency redis failed to start`). Crash-looping services are unaffected:
   Docker restarts the same container and Alloy keeps tailing it.
+- Same for `incident-migrate`: read it with `docker compose logs incident-migrate`.
+- An incident opens when its first alert **fires** (after the rule's `for`), so "opened"
+  is that time, not when the problem began (e.g. 1 minute earlier for DatabaseUnavailable).
+- The spool covers incident-db outages only. If the incident API container itself is down
+  while an alert fires and clears, Alertmanager can't deliver it and won't send the
+  resolved one later: that alert is missing here (email and Slack still have it).
+- Resolved is final for an alert firing `(fingerprint, startsAt)`. If Alertmanager itself
+  resolves an alert because Prometheus stopped re-sending it (Prometheus down for 4+
+  minutes) and Prometheus later re-sends the same firing, it is not reopened.
+- Correlation only joins **unresolved** incidents: a symptom that fires after its cause's
+  incident auto-resolved opens a new incident.
+- `make test` leaves its incidents (environment `incident-test-<pid>`), all resolved, in the
+  history: nothing is deleted. Running it twice within 15 minutes also fires
+  ContainerRestarting for incident-db (each run restarts it once).
 - If a migration fails while an older API container is already running, that container keeps
   running on the previous schema; Compose only blocks starting a new one.
 
@@ -261,10 +371,10 @@ Terraform and the AWS CLI are **not** installed on the host; they run as contain
 cp .env.example .env
 # fill in the empty passwords in .env (each line says how to generate it)
 make doctor   # read-only toolchain check
-make unit     # app unit tests, alert rule tests, config checks (in Docker, no stack needed)
+make unit     # app + incident API unit tests, alert rule tests, config checks (in Docker, no stack needed)
 make up       # build the app, start the stack, wait for healthchecks, reload configs
 make health   # every endpoint ready + AWS CLI provably pointed at Floci
-make test     # integration tests: platform, app, alerting (~5 min; briefly stops Redis and Postgres)
+make test     # integration tests: platform, app, incidents, alerting (~5 min; briefly stops Redis, Postgres, incident-db)
 make load     # k6 shoppers for 2m (DURATION=5m to change); watch Grafana meanwhile
 make aws ARGS="s3 ls"
 make tf ARGS="version"

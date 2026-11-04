@@ -1,6 +1,7 @@
 # Each target is a URL Blackbox Exporter GETs; 2xx = up. A failing probe fires
 # EndpointDown. App health checks carry `service`, so Alertmanager can mute them while
-# ApplicationDown or DatabaseUnavailable already explains the failure.
+# ApplicationDown (same service) or DatabaseUnavailable (ecommerce-api) already explains
+# the failure.
 - targets:
     - http://prometheus:9090/-/ready
     - http://alertmanager:9093/-/ready
@@ -14,3 +15,8 @@
   labels:
     environment: local
     service: ecommerce-api
+# 503 while incident-db is down.
+- targets: [http://incident-api:8000/health]
+  labels:
+    environment: local
+    service: incident-api

@@ -33,10 +33,10 @@ get_status() { curl -s -o /dev/null -w '%{http_code}' "$1"; }
 x_cache() { curl -s -D- -o /dev/null "$APP/products" | tr -d '\r' | awk -F': ' 'tolower($1)=="x-cache"{print $2}'; }
 
 echo "== Image provenance"
-# cop/ecommerce-api is a local-only name ("cop" is unclaimed on Docker Hub). It must be
-# built, never pulled: the migrate job runs it with the database owner password.
+# cop/ecommerce-api and cop/incident-api are local-only names ("cop" is unclaimed on Docker Hub). It must be
+# built, never pulled: the migrate jobs run them with the database owner passwords.
 policies=$(docker compose config --format json | jq -r '[.services | to_entries[] | select(.value.image // "" | startswith("cop/")) | "\(.key)=\(.value.pull_policy)"] | sort | join(" ")')
-[ "$policies" = "ecommerce-api=build ecommerce-migrate=never" ] \
+[ "$policies" = "ecommerce-api=build ecommerce-migrate=never incident-api=build incident-migrate=never" ] \
   && pass "local images never pulled from a registry ($policies)" || bad "unsafe pull policies: $policies"
 # During first-boot init Postgres listens on its Unix socket only; the healthcheck must
 # test TCP (what clients use), or the migrate job can start too early.

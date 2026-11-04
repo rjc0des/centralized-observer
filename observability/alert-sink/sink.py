@@ -1,13 +1,12 @@
-"""Local stand-in for notification receivers: logs each POST as one JSON line.
+"""Local stand-in for Slack: logs each POST as one JSON line.
 
-Alertmanager's webhook (/alertmanager) and, unless SLACK_WEBHOOK_URL is set, its
-Slack messages (/slack) arrive here. Payloads are alert notifications (labels,
+Unless SLACK_WEBHOOK_URL is set, Alertmanager's Slack messages (/slack) arrive here.
+(Its webhook goes to the incident API.) Payloads are alert notifications (labels,
 annotations, summaries), never customer data. Nothing is stored: stdout, and
 therefore Loki, is the record.
 
-ponytail: stdlib only. Threaded, so one stalled client can't hold up Alertmanager's
-webhooks (it did when single-threaded). The Phase 5 incident API replaces it as the
-webhook receiver.
+ponytail: stdlib only. Threaded, so one stalled client can't hold up Alertmanager
+(it did when single-threaded).
 """
 import json
 import os

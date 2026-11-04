@@ -268,7 +268,7 @@
       "gridPos": {
         "x": 16,
         "y": 0,
-        "w": 8,
+        "w": 4,
         "h": 4
       },
       "targets": [
@@ -321,6 +321,66 @@
         "justifyMode": "auto"
       },
       "description": "Share of the 30-day error budget not yet spent (99.9% availability SLO)."
+    },
+    {
+      "id": 10,
+      "type": "stat",
+      "title": "Open incidents",
+      "datasource": {
+        "type": "prometheus",
+        "uid": "prometheus"
+      },
+      "gridPos": {
+        "x": 20,
+        "y": 0,
+        "w": 4,
+        "h": 4
+      },
+      "targets": [
+        {
+          "expr": "sum(incidents_open) or 0 * max(probe_success{service=\"incident-api\"} == 1)",
+          "legendFormat": "",
+          "instant": true,
+          "refId": "A",
+          "datasource": {
+            "type": "prometheus",
+            "uid": "prometheus"
+          }
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {
+                "value": null,
+                "color": "green"
+              },
+              {
+                "value": 1,
+                "color": "red"
+              }
+            ]
+          },
+          "noValue": "unknown"
+        },
+        "overrides": []
+      },
+      "options": {
+        "reduceOptions": {
+          "calcs": [
+            "lastNotNull"
+          ],
+          "fields": "",
+          "values": false
+        },
+        "colorMode": "background",
+        "graphMode": "none",
+        "textMode": "auto",
+        "justifyMode": "auto"
+      },
+      "description": "Unresolved incidents in the incident API: http://127.0.0.1:8081/incidents?status=open. Shows unknown (not 0) while the incident API or its database is down."
     },
     {
       "id": 6,

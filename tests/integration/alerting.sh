@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Integration test for alerting on the running stack: rules loaded, Alertmanager
 # routing and inhibition, and one real outage end to end (Postgres stopped ->
-# DatabaseUnavailable -> webhook, Slack-format and email -> recovery notifications).
+# DatabaseUnavailable -> incident opened via the webhook, Slack-format and email ->
+# recovery notifications, incident auto-resolved).
 # Needs `make up` first. Stops Postgres for about 2-3 minutes; takes ~4 minutes.
 # The outage is skipped (SKIP, not PASS) when real email/Slack receivers are configured:
 # it would page people. Rule logic itself is unit-tested by promtool (make unit).
@@ -10,6 +11,7 @@ source "$(dirname "$0")/lib.sh"
 
 AM=http://127.0.0.1:9093
 MAILPIT=http://127.0.0.1:8025
+IAPI=http://127.0.0.1:8081
 trap 'docker compose start postgres >/dev/null 2>&1' EXIT
 
 # Alertmanager counts failed sends (e.g. a receiver answering with an error); a
@@ -39,10 +41,14 @@ add_alert DiskSpaceLow critical ',"device":"sda"'
 add_alert DiskSpaceLow warning ',"device":"sda"'
 add_alert DiskSpaceLow warning ',"device":"sdb"'
 add_alert DatabaseUnavailable critical
-add_alert HighHTTPErrorRate critical
+add_alert HighHTTPErrorRate critical ',"service":"ecommerce-api"'
+add_alert HighHTTPErrorRate critical ',"service":"incident-api"'
 add_alert InstanceDown critical
 add_alert PrometheusTargetMissing warning
 add_alert RedisUnavailable warning
+add_alert EndpointDown warning ',"service":"ecommerce-api"'
+add_alert EndpointDown warning ',"service":"incident-api"'
+add_alert ApplicationDown critical ',"service":"shop"'
 add_alert EndpointDown warning ',"service":"shop"'
 add_alert EndpointDown warning
 post_alerts "$batch"
@@ -55,20 +61,29 @@ check_state DatabaseUnavailable/critical/ "active critical" "critical routes to 
 check_state RedisUnavailable/warning/ "active warning" "warning routes to Slack + webhook"
 check_state DiskSpaceLow/warning/sda "suppressed warning" "critical twin on the same disk inhibits the warning"
 check_state DiskSpaceLow/warning/sdb "active warning" "control: a different disk is not inhibited"
-check_state HighHTTPErrorRate/critical/ "suppressed critical" "DatabaseUnavailable explains the 5xx"
+check_state HighHTTPErrorRate/critical/ecommerce-api "suppressed critical" "DatabaseUnavailable explains the e-commerce 5xx"
+check_state HighHTTPErrorRate/critical/incident-api "active critical" "control: another service's 5xx is not blamed on Postgres"
 check_state PrometheusTargetMissing/warning/ "suppressed warning" "InstanceDown on the same target"
-check_state EndpointDown/warning/shop "suppressed warning" "DatabaseUnavailable explains an app's failing health check"
+check_state EndpointDown/warning/ecommerce-api "suppressed warning" "DatabaseUnavailable explains the e-commerce health check"
+check_state EndpointDown/warning/shop "suppressed warning" "ApplicationDown explains the same app's health check"
+check_state EndpointDown/warning/incident-api "active warning" "control: neither Postgres nor another app's outage explains it"
 check_state EndpointDown/warning/ "active warning" "control: an endpoint without a service is not inhibited"
 now=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 resolve=$(jq -c --arg t "$now" 'map({labels, endsAt: $t}) | .[]' <<<"$am_alerts" | paste -sd, -)
 post_alerts "$resolve"
 
 echo "== End to end: Postgres outage"
-# stdout of alert-sink, one JSON object per notification received since $1.
+# stdout of alert-sink (the local Slack stand-in), one JSON object per message since $1.
 sink_since() { docker compose logs --no-log-prefix --since "$1" alert-sink 2>/dev/null | jq -c 'select(.payload)' 2>/dev/null; }
-webhook_has() { # <since> <status>: alert-sink got a webhook for DatabaseUnavailable with that status
-  sink_since "$1" | jq -e --arg s "$2" 'select(.path == "/alertmanager" and .payload.status == $s and .payload.receiver == "critical")
-    | .payload.alerts[] | select(.labels.alertname == "DatabaseUnavailable" and .labels.environment == "local")' >/dev/null; }
+# The incident (JSON) holding a DatabaseUnavailable alert in environment local that
+# started after <since> (ISO time; compared to the second). Empty if none.
+db_incident() {
+  local id
+  id=$(curl -fsS "$IAPI/incidents?environment=local&limit=20" | jq -r '[.[] | select(.alertnames | index("DatabaseUnavailable"))][0].id // empty')
+  [ -n "$id" ] && curl -fsS "$IAPI/incidents/$id" |
+    jq -ce --arg t "${1:0:19}" 'select(any(.alerts[]; .alertname == "DatabaseUnavailable" and .starts_at[:19] >= $t))'
+}
+incident_is() { [ "$(db_incident "$1" | jq -r .status)" = "$2" ]; }
 slack_has() { sink_since "$1" | jq -e --arg t "$2" 'select(.path == "/slack" and (.payload.attachments[0].title | startswith($t)))' >/dev/null; }
 email_has() { # <since-epoch> <subject prefix>
   curl -fsS "$MAILPIT/api/v1/messages" | jq -e --argjson t "$1" --arg p "$2" '.messages[]
@@ -94,14 +109,17 @@ start=$(date -u +%Y-%m-%dT%H:%M:%SZ); start_epoch=$(date +%s)
 docker compose stop postgres >/dev/null 2>&1
 firing() { [ "$(curl -fsS "$PROM/api/v1/alerts" | jq -r '[.data.alerts[] | select(.labels.alertname == "DatabaseUnavailable" and .state == "firing")] | length')" -gt 0 ]; }
 retry 36 5 firing && pass "DatabaseUnavailable firing in Prometheus after $(( $(date +%s) - start_epoch ))s (for: 1m)" || bad "DatabaseUnavailable did not fire within 3 minutes"
-retry 18 5 webhook_has "$start" firing && pass "webhook: firing notification (receiver critical, environment=local)" || bad "no firing webhook for DatabaseUnavailable"
+# Postgres is still down here: the incident API records it in its own database.
+retry 18 5 incident_is "$start" open && pass "webhook: incident opened while Postgres is still down (incident $(db_incident "$start" | jq .id))" \
+  || bad "no open incident for DatabaseUnavailable (curl $IAPI/incidents)"
 slack_has "$start" "[FIRING:1] DatabaseUnavailable" && pass "Slack-format: firing message" || bad "no firing Slack message"
 retry 6 5 email_has "$start_epoch" "[FIRING:1] DatabaseUnavailable" && pass "email: firing message in Mailpit" || bad "no firing email in Mailpit"
 email_links_open
 
 recovered=$(date -u +%Y-%m-%dT%H:%M:%SZ); recovered_epoch=$(date +%s)
 docker compose start postgres >/dev/null 2>&1
-retry 30 5 webhook_has "$recovered" resolved && pass "webhook: resolved notification $(( $(date +%s) - recovered_epoch ))s after Postgres restarted" || bad "no resolved webhook"
+retry 30 5 incident_is "$start" resolved && pass "webhook: incident auto-resolved $(( $(date +%s) - recovered_epoch ))s after Postgres restarted" \
+  || bad "incident not resolved: $(db_incident "$start" | jq -c '{id, status}')"
 slack_has "$recovered" "[RESOLVED] DatabaseUnavailable" && pass "Slack-format: resolved message" || bad "no resolved Slack message"
 retry 6 5 email_has "$recovered_epoch" "[RESOLVED] DatabaseUnavailable" && pass "email: resolved message in Mailpit" || bad "no resolved email in Mailpit"
 

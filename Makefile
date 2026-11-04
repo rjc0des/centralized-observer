@@ -38,7 +38,7 @@ logs: ## Follow logs (S=<service> for one)
 health: ## Check every published endpoint is ready, and the AWS CLI talks to Floci, not real AWS
 	@for u in prometheus=http://127.0.0.1:9090/-/ready alertmanager=http://127.0.0.1:9093/-/ready \
 	          loki=http://127.0.0.1:3100/ready alloy=http://127.0.0.1:12345/-/ready grafana=http://127.0.0.1:3000/api/health \
-	          ecommerce-api=http://127.0.0.1:8080/health mailpit=http://127.0.0.1:8025/readyz; do \
+	          ecommerce-api=http://127.0.0.1:8080/health incident-api=http://127.0.0.1:8081/health mailpit=http://127.0.0.1:8025/readyz; do \
 	  curl -fsS -o /dev/null -m 5 "$${u#*=}" && echo "$${u%%=*}: ready" || { echo "$${u%%=*}: NOT ready ($${u#*=})"; exit 1; }; \
 	done
 	@curl -fsS http://127.0.0.1:$(FLOCI_PORT)/_floci/init | grep -q '"ready":true' && echo "floci: ready on 127.0.0.1:$(FLOCI_PORT)"
@@ -52,8 +52,9 @@ aws: ## AWS CLI against Floci, e.g. make aws ARGS="s3 ls"
 tf: ## Terraform (Floci creds), e.g. make tf ARGS="-chdir=infrastructure/terraform/environments/local plan"
 	@$(RUN) terraform $(ARGS)
 
-unit: ## Unit tests: app (Docker test stage), alert rules (promtool), Alertmanager config (amtool); no stack needed
+unit: ## Unit tests: apps (Docker test stage), alert rules (promtool), Alertmanager config (amtool); no stack needed
 	docker build --target test apps/ecommerce-api
+	docker build --target test apps/incident-api
 	@$(RUN) --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
 	@$(RUN) --no-deps -T --entrypoint promtool -w /etc/prometheus/tests prometheus test rules alerts.test.yml
 	@$(RUN) --no-deps -T alertmanager check
@@ -61,6 +62,7 @@ unit: ## Unit tests: app (Docker test stage), alert rules (promtool), Alertmanag
 test: ## Integration tests against the running stack
 	@tests/integration/observability.sh
 	@tests/integration/ecommerce.sh
+	@tests/integration/incidents.sh
 	@tests/integration/alerting.sh
 
 load: ## Generate shop traffic with k6, e.g. make load DURATION=5m

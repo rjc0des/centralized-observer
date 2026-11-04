@@ -2,3 +2,7 @@
   labels:
     environment: local
     service: ecommerce-api
+- targets: [incident-api:8000]
+  labels:
+    environment: local
+    service: incident-api

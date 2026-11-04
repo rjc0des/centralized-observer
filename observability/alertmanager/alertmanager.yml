@@ -1,7 +1,8 @@
 # Template: render.sh fills the ${...} placeholders from the container environment
 # at start (Alertmanager can't read environment variables itself). Values come from
 # .env; when unset, email goes to Mailpit (http://127.0.0.1:8025) and Slack messages
-# to alert-sink, so routing works locally without real credentials.
+# to alert-sink, so routing works locally without real credentials. The webhook goes
+# to the incident API (apps/incident-api), which turns alerts into incidents.
 # Edits need `make reload` (re-renders, then reloads).
 global:
   resolve_timeout: 5m
@@ -30,6 +31,8 @@ route:
 
 # Mute an alert while a higher-level alert already explains it. Labels listed in
 # `equal` must match; a label missing on both sides counts as matching.
+# The incident API's correlation rules (apps/incident-api/app/correlation.py) use the
+# same cause -> symptom pairs: change both together.
 inhibit_rules:
   # Critical twin of the same alert on the same target (e.g. DiskSpaceLow at 5% vs 15%).
   - source_matchers: [severity="critical"]
@@ -39,23 +42,27 @@ inhibit_rules:
   - source_matchers: [alertname=~"InstanceDown|ApplicationDown"]
     target_matchers: [alertname="PrometheusTargetMissing"]
     equal: [job, instance]
-  # Postgres down is the cause of the API's 5xx and its availability budget burn.
+  # Postgres (the e-commerce database) down is the cause of that API's 5xx, its
+  # availability budget burn and its failing health check. Other services have their own.
   - source_matchers: [alertname="DatabaseUnavailable"]
-    target_matchers: [alertname=~"HighHTTPErrorRate|ErrorBudgetFastBurn|ErrorBudgetSlowBurn"]
+    target_matchers: [alertname=~"HighHTTPErrorRate|ErrorBudgetFastBurn|ErrorBudgetSlowBurn|EndpointDown", service="ecommerce-api"]
     equal: [environment]
-  # An app's failing health check is explained by the app or its database being down.
-  # Only probes labelled with a service (app health checks) are muted.
-  - source_matchers: [alertname=~"ApplicationDown|DatabaseUnavailable"]
-    target_matchers: [alertname="EndpointDown", service=~".+"]
-    equal: [environment]
+  # An app's failing health check is explained by that app being down.
+  - source_matchers: [alertname="ApplicationDown"]
+    target_matchers: [alertname="EndpointDown"]
+    equal: [environment, service]
 
 receivers:
   - name: critical
-    # ponytail: alert-sink only logs what it receives; the Phase 5 incident API takes
-    # over this webhook.
+    # The incident API accepts webhooks even while its database is down (spool). If the API
+    # itself is down, a failed POST is retried until the flush times out and at each later
+    # flush, but only while the alert still fires: no firing delivered = no resolved sent.
     webhook_configs: &webhook
-      - url: http://alert-sink:8080/alertmanager
+      - url: http://incident-api:8000/alertmanager
         send_resolved: true
+        http_config:
+          authorization:
+            credentials: "${INCIDENT_API_TOKEN}"
     email_configs:
       - to: "${ALERT_EMAIL_TO}"
         send_resolved: true

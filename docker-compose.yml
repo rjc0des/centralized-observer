@@ -83,8 +83,7 @@ services:
     restart: unless-stopped
     logging: *logging
 
-  # Shared by the e-commerce API now and the incident service in Phase 5 (separate
-  # databases and roles). Not published to the host.
+  # The e-commerce API's database. Not published to the host.
   postgres:
     image: postgres:18.6-alpine3.24@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
     environment:
@@ -124,6 +123,80 @@ services:
     restart: unless-stopped
     logging: *logging
 
+  # --- Incident management -----------------------------------------------------
+
+  # Its own Postgres, not the application's: incidents must keep being recorded while
+  # the database they are about is down (DatabaseUnavailable). Not published.
+  incident-db:
+    image: postgres:18.6-alpine3.24@sha256:10a5c69a83035ab5239f5620d708520e8b28f5aa1f2b20143e6024532edadfb5
+    environment:
+      POSTGRES_PASSWORD: ${INCIDENT_DB_PASSWORD:?set INCIDENT_DB_PASSWORD in .env}
+      INCIDENT_OWNER_PASSWORD: ${INCIDENT_OWNER_PASSWORD:?set INCIDENT_OWNER_PASSWORD in .env}
+      INCIDENT_APP_PASSWORD: ${INCIDENT_APP_PASSWORD:?set INCIDENT_APP_PASSWORD in .env}
+    volumes:
+      - incident-db-data:/var/lib/postgresql
+      - ./database/incident-init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD", "pg_isready", "-h", "127.0.0.1", "-U", "postgres", "-d", "postgres"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+    logging: *logging
+
+  # One-shot schema migration job (owner role), like ecommerce-migrate.
+  incident-migrate:
+    image: cop/incident-api:dev
+    pull_policy: never   # local image only (see ecommerce-migrate)
+    command: ["python", "-m", "app.migrate"]
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      PGHOST: incident-db
+      PGDATABASE: incidents
+      PGUSER: incident_owner
+      PGPASSWORD: ${INCIDENT_OWNER_PASSWORD:?set INCIDENT_OWNER_PASSWORD in .env}
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on:
+      incident-db:
+        condition: service_healthy
+    restart: "no"
+    logging: *logging
+
+  # Alertmanager's webhook receiver: deduplicates alerts, correlates them into
+  # incidents, tracks acknowledge/resolve, writes reports. API docs: http://127.0.0.1:8081/docs
+  incident-api:
+    build: ./apps/incident-api
+    image: cop/incident-api:dev
+    pull_policy: build
+    init: true
+    environment:
+      ENVIRONMENT: ${ENVIRONMENT:-local}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      PGHOST: incident-db
+      PGDATABASE: incidents
+      PGUSER: incident_app
+      PGPASSWORD: ${INCIDENT_APP_PASSWORD:?set INCIDENT_APP_PASSWORD in .env}
+      INCIDENT_API_TOKEN: ${INCIDENT_API_TOKEN:?set INCIDENT_API_TOKEN in .env}
+    ports:
+      - "127.0.0.1:8081:8000"
+    volumes:
+      - incident-spool:/spool   # webhooks accepted while incident-db is down
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1:8000/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      incident-migrate:
+        condition: service_completed_successfully
+    restart: unless-stopped
+    logging: *logging
+
   # --- Observability stack ---------------------------------------------------
 
   prometheus:
@@ -152,6 +225,7 @@ services:
 
   # render.sh fills alertmanager.yml's ${VAR}s from this environment, then starts
   # Alertmanager. Unset values default to the local stand-ins below (Mailpit, alert-sink).
+  # The webhook goes to incident-api.
   alertmanager:
     image: prom/alertmanager:v0.34.2@sha256:39d8bb3966c694a124428a3a88fbcffd40bd069129ecd47c059f8a3f17c55f3b
     entrypoint: [/bin/sh, /etc/alertmanager/render.sh]
@@ -167,6 +241,7 @@ services:
       SMTP_REQUIRE_TLS: ${SMTP_REQUIRE_TLS:-false}
       ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-oncall@cop.local}
       SLACK_WEBHOOK_URL: ${SLACK_WEBHOOK_URL:-http://alert-sink:8080/slack}
+      INCIDENT_API_TOKEN: ${INCIDENT_API_TOKEN:?set INCIDENT_API_TOKEN in .env}
     ports:
       - "127.0.0.1:9093:9093"
     volumes:
@@ -182,7 +257,7 @@ services:
 
   # Local stand-ins for notification receivers. Mailpit catches Alertmanager's email
   # (inbox at http://127.0.0.1:8025, in memory, gone on restart); alert-sink logs
-  # webhook and Slack-format messages as JSON lines (docker compose logs alert-sink).
+  # Slack-format messages as JSON lines (docker compose logs alert-sink).
   mailpit:
     image: axllent/mailpit:v1.31.6@sha256:23fe39e81bde596a918000b3135c0f85dc8bb4c9ea6be274b051143f3e300387
     user: "65534:65534"
@@ -385,3 +460,5 @@ volumes:
   alloy-data:
   grafana-data:
   postgres-data:
+  incident-db-data:
+  incident-spool:
