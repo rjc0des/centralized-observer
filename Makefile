@@ -6,8 +6,9 @@ FLOCI_PORT ?= 4566
 COMPOSE := docker compose
 RUN := $(COMPOSE) --progress quiet run --rm
 DURATION ?= 2m
+TF_LOCAL := infrastructure/terraform/environments/local
 
-.PHONY: help doctor up down ps logs reload health aws tf unit test load clean
+.PHONY: help doctor up down ps logs reload health aws tf infra unit test load clean
 
 help: ## List targets
 	@grep -E '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk -F':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
@@ -52,18 +53,24 @@ aws: ## AWS CLI against Floci, e.g. make aws ARGS="s3 ls"
 tf: ## Terraform (Floci creds), e.g. make tf ARGS="-chdir=infrastructure/terraform/environments/local plan"
 	@$(RUN) terraform $(ARGS)
 
-unit: ## Unit tests: apps (Docker test stage), alert rules (promtool), Alertmanager config (amtool); no stack needed
+infra: ## Apply infrastructure/terraform/environments/local to Floci (init + apply, no prompt)
+	@$(RUN) terraform -chdir=$(TF_LOCAL) init -input=false -no-color >/dev/null
+	@$(RUN) terraform -chdir=$(TF_LOCAL) apply -auto-approve -input=false -no-color
+
+unit: ## Unit tests: apps (Docker test stage), alert rules (promtool), Alertmanager config (amtool), terraform fmt; no stack needed
 	docker build --target test apps/ecommerce-api
 	docker build --target test apps/incident-api
 	@$(RUN) --no-deps -T --entrypoint promtool prometheus check config /etc/prometheus/prometheus.yml
 	@$(RUN) --no-deps -T --entrypoint promtool -w /etc/prometheus/tests prometheus test rules alerts.test.yml
 	@$(RUN) --no-deps -T alertmanager check
+	@$(RUN) --no-deps -T terraform fmt -check -recursive infrastructure/terraform && echo "terraform fmt: ok"
 
 test: ## Integration tests against the running stack
 	@tests/integration/observability.sh
 	@tests/integration/ecommerce.sh
 	@tests/integration/incidents.sh
 	@tests/integration/alerting.sh
+	@tests/integration/infra.sh
 
 load: ## Generate shop traffic with k6, e.g. make load DURATION=5m
 	@$(RUN) -e DURATION=$(DURATION) k6 run /scripts/ecommerce.js

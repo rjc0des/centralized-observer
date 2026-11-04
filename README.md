@@ -7,7 +7,7 @@ management for multiple applications, developed locally on OrbStack with
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 5 (incident management).** Only what is listed under
+> **Status: Phase 6 (Terraform, verified on Floci).** Only what is listed under
 > "Working today" has been implemented and tested. The full README is written in Phase 9.
 
 ## Working today
@@ -32,7 +32,7 @@ Inspired by Uber Engineering's
 | k6 | `1.8.2` | — | Load generator (`make load`) |
 | Floci (AWS emulator) | `2.4.0` | http://127.0.0.1:4566 | State persisted in the `floci-data` volume |
 | AWS CLI | `2.38.6` | — | Container, hardwired to Floci with fake credentials |
-| Terraform | `1.16.7` | — | Container, Floci credentials, shared plugin cache |
+| Terraform | `1.16.7`, AWS provider `6.71.0` | — | Container, Floci credentials, shared plugin cache; lock file committed |
 
 All images are pinned by tag and multi-arch digest. No `latest` tags.
 Everything published binds to `127.0.0.1`; exporters are only reachable inside the Docker network.
@@ -299,6 +299,45 @@ Alloy collects logs from every container in this compose project (and `/var/log/
 3. **Labels** streams with `service`, `container`, `level`, `environment`; `trace_id` goes to
    structured metadata, never a label, to keep cardinality bounded.
 
+### Infrastructure as code (Terraform)
+
+```
+infrastructure/terraform/
+  modules/network   VPC, one public subnet, IGW, host security group (no inbound; egress 443/587), default SG emptied
+  modules/storage   S3 bucket: versioned, SSE-S3, TLS-only policy, public access blocked, ACLs off, old versions expire (30d)
+  modules/ecr       ECR repos cop/ecommerce-api, cop/incident-api: immutable tags, scan on push, keep newest 10
+  modules/secrets   SSM SecureString per secret, /cop/<env>/<ENV_VAR_NAME>; values write-only (never in state).
+                    Locally the 9 required ones: SMTP_AUTH_PASSWORD and SLACK_WEBHOOK_URL are empty and
+                    SSM rejects empty values
+  modules/host      t4g.small (Amazon Linux 2023 arm64), IMDSv2, encrypted gp3; instance role: own secrets,
+                    own images, own bucket (no delete), Session Manager. No SSH key, no managed policies
+                    (AmazonSSMManagedInstanceCore would allow reading every parameter in the account)
+  environments/local  all modules applied to Floci: `make infra`
+```
+
+- **Secrets never reach the state file.** `aws_ssm_parameter.value_wo` (write-only) with an
+  ephemeral variable; Compose builds `TF_VAR_secrets` from `.env`. Terraform cannot detect
+  drift in a write-only value: re-sync one with
+  `-replace='module.secrets.aws_ssm_parameter.this["NAME"]'` or bump the module's `rotation`.
+- **The local provider only accepts account `000000000000`** (`allowed_account_ids`), on top of
+  the fake credentials. `make test` proves a plan in another account is refused.
+- `tests/integration/infra.sh` applies, requires an empty second plan (Floci returns what
+  was written), checks no secret is in the state, then reads every security setting back with
+  the AWS CLI. Each check was made to fail once by reverting what it guards.
+
+**What Floci 2.4.0 was verified to do** (AWS CLI first, then Terraform), `ap-south-1`:
+
+| Service | Operations verified | Gaps found |
+|---|---|---|
+| S3 | create (location constraint), versioning, SSE-S3, public access block, ownership controls, lifecycle, bucket policy, tags (incl. S3 Control), put/get/delete objects and versions | Bucket policies are stored, **not enforced** (a TLS-only bucket still answered plain HTTP) |
+| ECR | create (immutable, scan on push, AES256), lifecycle policy, describe, auth token | **DeleteRepository fails** ("backing registry unreachable"); push/pull unavailable. With the Docker socket mounted Floci starts `registry:2` but still can't reach it from its own container, so the socket stays unmounted |
+| IAM | roles, inline and AWS-managed policies, instance profiles | Policies are not enforced by default |
+| SSM / KMS | SecureString with `alias/aws/ssm`, by-path reads, write-only values, public AMI parameter | `get-parameter` returns plaintext even without `--with-decryption` |
+| VPC | VPC + DNS attributes, subnet, IGW, route table + route, SG rules (`aws_vpc_security_group_*_rule`), default SG | `ModifySecurityGroupRules` returns true and changes nothing (Terraform then shows drift: change a rule by replacing it). After the default egress rule is revoked, `describe-security-group-rules` still lists it while `describe-security-groups` doesn't (tests read the latter) |
+| EC2 | describe images/AZs/instance types, run/terminate, IMDSv2 options, encrypted root volume | **Metadata only** without a Docker socket: no container, UserData or SSM commands (experimental; workloads run in Compose) |
+
+Not verified, so not claimed: real network isolation, IAM enforcement, ECR image push, deletion of ECR repositories.
+
 ### Security notes (current state)
 
 - **Docker socket = root.** Alloy and cAdvisor mount `/var/run/docker.sock`. Mounting it `:ro`
@@ -355,6 +394,10 @@ Alloy collects logs from every container in this compose project (and `/var/log/
 - `make test` leaves its incidents (environment `incident-test-<pid>`), all resolved, in the
   history: nothing is deleted. Running it twice within 15 minutes also fires
   ContainerRestarting for incident-db (each run restarts it once).
+- `environments/local` stays applied (like the rest of the stack); `terraform destroy` stops at
+  the ECR repositories (Floci can't delete them, see above). `make clean` wipes Floci's data;
+  the next `make infra` recreates everything (state notices the resources are gone).
+- The emulated EC2 instance is a record, not a machine; the platform itself runs in Compose.
 - If a migration fails while an older API container is already running, that container keeps
   running on the previous schema; Compose only blocks starting a new one.
 
@@ -371,10 +414,11 @@ Terraform and the AWS CLI are **not** installed on the host; they run as contain
 cp .env.example .env
 # fill in the empty passwords in .env (each line says how to generate it)
 make doctor   # read-only toolchain check
-make unit     # app + incident API unit tests, alert rule tests, config checks (in Docker, no stack needed)
+make unit     # app + incident API unit tests, alert rule tests, config checks, terraform fmt (in Docker, no stack needed)
 make up       # build the app, start the stack, wait for healthchecks, reload configs
 make health   # every endpoint ready + AWS CLI provably pointed at Floci
-make test     # integration tests: platform, app, incidents, alerting (~5 min; briefly stops Redis, Postgres, incident-db)
+make test     # integration tests: platform, app, incidents, alerting, Terraform on Floci (~6 min; briefly stops Redis, Postgres, incident-db)
+make infra    # apply infrastructure/terraform/environments/local to Floci
 make load     # k6 shoppers for 2m (DURATION=5m to change); watch Grafana meanwhile
 make aws ARGS="s3 ls"
 make tf ARGS="version"
@@ -386,7 +430,8 @@ make down     # stop (keeps data); `make clean` deletes volumes after confirmati
 The `aws` and `terraform` containers set `AWS_ACCESS_KEY_ID=test`,
 `AWS_ENDPOINT_URL=http://floci:4566` and never mount `~/.aws`. Even with the
 endpoint removed, the fake keys are rejected by real AWS. `make health` asserts
-the caller account is Floci's `000000000000`.
+the caller account is Floci's `000000000000`, and the local Terraform provider refuses
+any other account (`allowed_account_ids`).
 
 ## Environment variables
 

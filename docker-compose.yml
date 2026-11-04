@@ -20,6 +20,11 @@ services:
       - "127.0.0.1:${FLOCI_PORT:-4566}:4566"
     volumes:
       - floci-data:/app/data
+    networks:
+      default:
+        # S3 Control puts the account ID in the hostname (<account>.<endpoint host>); the
+        # AWS provider reads bucket tags through it. Floci's account is always 000000000000.
+        aliases: ["000000000000.floci"]
     restart: unless-stopped
     logging: *logging
 
@@ -443,6 +448,14 @@ services:
       <<: *local-aws
       TF_PLUGIN_CACHE_DIR: /plugin-cache
       TF_IN_AUTOMATION: "1"
+      # Secrets for environments/local's SSM parameters (write-only: never in state).
+      # JSON-safe because .env.example asks for hex/base64 values.
+      TF_VAR_secrets: >-
+        {"POSTGRES_PASSWORD":"${POSTGRES_PASSWORD}","ECOMMERCE_OWNER_PASSWORD":"${ECOMMERCE_OWNER_PASSWORD}",
+        "ECOMMERCE_APP_PASSWORD":"${ECOMMERCE_APP_PASSWORD}","INCIDENT_DB_PASSWORD":"${INCIDENT_DB_PASSWORD}",
+        "INCIDENT_OWNER_PASSWORD":"${INCIDENT_OWNER_PASSWORD}","INCIDENT_APP_PASSWORD":"${INCIDENT_APP_PASSWORD}",
+        "INCIDENT_API_TOKEN":"${INCIDENT_API_TOKEN}","REDIS_PASSWORD":"${REDIS_PASSWORD}",
+        "GRAFANA_ADMIN_PASSWORD":"${GRAFANA_ADMIN_PASSWORD}"}
     working_dir: /work
     volumes:
       - ./:/work
