@@ -1,0 +1,190 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "ReadOnlyDescribe",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:Describe*",
+        "ssm:DescribeParameters",
+        "ssm:DescribeInstanceInformation"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-south-1"
+        }
+      }
+    },
+    {
+      "Sid": "NetworkAndInstance",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateVpc",
+        "ec2:DeleteVpc",
+        "ec2:ModifyVpcAttribute",
+        "ec2:CreateSubnet",
+        "ec2:DeleteSubnet",
+        "ec2:ModifySubnetAttribute",
+        "ec2:CreateInternetGateway",
+        "ec2:AttachInternetGateway",
+        "ec2:DetachInternetGateway",
+        "ec2:DeleteInternetGateway",
+        "ec2:CreateRouteTable",
+        "ec2:DeleteRouteTable",
+        "ec2:CreateRoute",
+        "ec2:DeleteRoute",
+        "ec2:AssociateRouteTable",
+        "ec2:DisassociateRouteTable",
+        "ec2:CreateSecurityGroup",
+        "ec2:DeleteSecurityGroup",
+        "ec2:AuthorizeSecurityGroupIngress",
+        "ec2:AuthorizeSecurityGroupEgress",
+        "ec2:RevokeSecurityGroupIngress",
+        "ec2:RevokeSecurityGroupEgress",
+        "ec2:ModifySecurityGroupRules",
+        "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
+        "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
+        "ec2:RunInstances",
+        "ec2:TerminateInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyInstanceMetadataOptions",
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-south-1"
+        }
+      }
+    },
+    {
+      "Sid": "HostRoleAndProfile",
+      "Effect": "Allow",
+      "Action": [
+        "iam:DeleteRole",
+        "iam:GetRole",
+        "iam:TagRole",
+        "iam:UntagRole",
+        "iam:UpdateAssumeRolePolicy",
+        "iam:GetRolePolicy",
+        "iam:DeleteRolePolicy",
+        "iam:ListRolePolicies",
+        "iam:ListAttachedRolePolicies",
+        "iam:ListInstanceProfilesForRole",
+        "iam:CreateInstanceProfile",
+        "iam:DeleteInstanceProfile",
+        "iam:GetInstanceProfile",
+        "iam:TagInstanceProfile",
+        "iam:UntagInstanceProfile",
+        "iam:AddRoleToInstanceProfile",
+        "iam:RemoveRoleFromInstanceProfile"
+      ],
+      "Resource": [
+        "arn:aws:iam::ACCOUNT_ID:role/cop-*",
+        "arn:aws:iam::ACCOUNT_ID:instance-profile/cop-*"
+      ]
+    },
+    {
+      "Sid": "PassHostRoleToEc2Only",
+      "Effect": "Allow",
+      "Action": "iam:PassRole",
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/cop-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PassedToService": "ec2.amazonaws.com"
+        }
+      }
+    },
+    {
+      "Sid": "OwnBuckets",
+      "Effect": "Allow",
+      "Action": "s3:*",
+      "Resource": [
+        "arn:aws:s3:::cop-*",
+        "arn:aws:s3:::cop-*/*"
+      ]
+    },
+    {
+      "Sid": "EcrLogin",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "OwnRepositories",
+      "Effect": "Allow",
+      "Action": "ecr:*",
+      "Resource": "arn:aws:ecr:ap-south-1:ACCOUNT_ID:repository/cop/*"
+    },
+    {
+      "Sid": "OwnSecrets",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:PutParameter",
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:DeleteParameter",
+        "ssm:AddTagsToResource",
+        "ssm:RemoveTagsFromResource",
+        "ssm:ListTagsForResource"
+      ],
+      "Resource": "arn:aws:ssm:ap-south-1:ACCOUNT_ID:parameter/cop/*"
+    },
+    {
+      "Sid": "PublicAmiLookup",
+      "Effect": "Allow",
+      "Action": "ssm:GetParameter",
+      "Resource": "arn:aws:ssm:ap-south-1::parameter/aws/service/ami-amazon-linux-latest/*"
+    },
+    {
+      "Sid": "SessionManagerShell",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+        "arn:aws:ssm:ap-south-1:ACCOUNT_ID:document/SSM-SessionManagerRunShell"
+      ]
+    },
+    {
+      "Sid": "OwnSessions",
+      "Effect": "Allow",
+      "Action": [
+        "ssm:TerminateSession",
+        "ssm:ResumeSession"
+      ],
+      "Resource": "arn:aws:ssm:ap-south-1:ACCOUNT_ID:session/${aws:username}-*"
+    },
+    {
+      "Sid": "CreateRolesOnlyWithBoundary",
+      "Effect": "Allow",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "arn:aws:iam::ACCOUNT_ID:role/cop-*",
+      "Condition": {
+        "StringEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/cop-host-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "NeverLiftTheBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:DeleteRolePermissionsBoundary",
+        "iam:PutRolePermissionsBoundary",
+        "iam:AttachRolePolicy",
+        "iam:CreatePolicyVersion",
+        "iam:SetDefaultPolicyVersion",
+        "iam:DeletePolicyVersion",
+        "iam:DeletePolicy"
+      ],
+      "Resource": "*"
+    }
+  ]
+}

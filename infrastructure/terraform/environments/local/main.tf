@@ -72,16 +72,24 @@ module "secrets" {
   values = var.secrets
 }
 
+# Caps the host role. On real AWS an admin creates this policy, not Terraform: a key that
+# could edit the boundary could lift it. Floci stores boundaries but doesn't enforce them.
+resource "aws_iam_policy" "host_boundary" {
+  name   = "${local.name}-host-boundary"
+  policy = file("${path.module}/../../../iam/host-boundary.json")
+}
+
 # On Floci without a Docker socket the instance is metadata only (no container,
 # no UserData or SSM commands); the workloads run in Docker Compose instead.
 module "host" {
-  source              = "../../modules/host"
-  name                = local.name
-  subnet_id           = module.network.subnet_id
-  security_group_id   = module.network.security_group_id
-  secrets_path        = "/cop/local"
-  ecr_repository_arns = module.ecr.arns
-  bucket_arn          = module.backups.arn
+  source               = "../../modules/host"
+  name                 = local.name
+  subnet_id            = module.network.subnet_id
+  security_group_id    = module.network.security_group_id
+  secrets_path         = "/cop/local"
+  ecr_repository_arns  = module.ecr.arns
+  bucket_arn           = module.backups.arn
+  permissions_boundary = aws_iam_policy.host_boundary.arn
 }
 
 output "bucket" {

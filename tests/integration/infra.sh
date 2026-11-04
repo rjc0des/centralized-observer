@@ -78,6 +78,16 @@ wild=$(jq -r '[.Statement[] | select([.Resource] | flatten | index("*")) | .Sid]
 [ "$wild" = EcrLogin,SessionManager ] && pass "\"*\" resources only for ECR login and Session Manager" || bad "wildcard resources in: $wild"
 risky=$(jq -r '[.Statement[].Action] | flatten | map(select(test("\\*|Delete"))) | join(",")' <<<"$doc")
 [ -z "$risky" ] && pass "no wildcard or delete actions (host cannot erase backups)" || bad "risky actions: $risky"
+# The boundary caps the role, so a deploy key that may create roles can't mint an admin one.
+BARN=arn:aws:iam::000000000000:policy/cop-local-host-boundary
+got=$(aws iam get-role --role-name cop-local | jq -r '.Role.PermissionsBoundary.PermissionsBoundaryArn')
+[ "$got" = "$BARN" ] && pass "host role carries the permissions boundary" || bad "host role boundary: $got"
+# Floci doesn't enforce boundaries: an action the role uses but the boundary lacks would
+# only fail on real AWS. Compare against the boundary as stored, not the file.
+ver=$(aws iam get-policy --policy-arn "$BARN" | jq -r .Policy.DefaultVersionId)
+bdoc=$(aws iam get-policy-version --policy-arn "$BARN" --version-id "$ver" | jq -r .PolicyVersion.Document)
+outside=$(jq -rn --argjson p "$doc" --argjson b "$bdoc" '([$p.Statement[].Action] | flatten) - ([$b.Statement[].Action] | flatten) | join(",")')
+[ -z "$outside" ] && pass "every host action is inside the boundary" || bad "host actions outside the boundary: ${outside:-unreadable boundary}"
 
 echo "== Network and host"
 sg=$(aws ec2 describe-security-groups --filters Name=group-name,Values=cop-local-host | jq -c '.SecurityGroups[0]')

@@ -37,6 +37,12 @@ variable "bucket_arn" {
   type = string
 }
 
+# ARN of the policy capping this role (infrastructure/iam/host-boundary.json). Required:
+# the deploy key may only create roles that carry it, so it can't mint an admin role.
+variable "permissions_boundary" {
+  type = string
+}
+
 data "aws_partition" "current" {}
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
@@ -57,8 +63,9 @@ data "aws_iam_policy_document" "assume" {
 }
 
 resource "aws_iam_role" "this" {
-  name               = var.name
-  assume_role_policy = data.aws_iam_policy_document.assume.json
+  name                 = var.name
+  assume_role_policy   = data.aws_iam_policy_document.assume.json
+  permissions_boundary = var.permissions_boundary
 }
 
 data "aws_iam_policy_document" "host" {
