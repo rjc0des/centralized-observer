@@ -3,6 +3,7 @@
 # container (profile "cop", ~/.aws read-only); nothing here reads the credentials itself.
 #   scripts/aws.sh check            account guard: profile must be AWS_ACCOUNT_ID
 #   scripts/aws.sh deploy           build + push images, upload the release, run it on the host
+#   scripts/aws.sh rollback         redeploy the host's last good release (after a failed deploy)
 #   scripts/aws.sh tunnel           SSM port-forward Grafana/Prometheus/Alertmanager to the Mac
 #   scripts/aws.sh run '<script>'   run a shell script on the host as root (Run Command)
 set -euo pipefail
@@ -36,12 +37,13 @@ instance() {
 }
 
 # Run Command: prints the script's stdout (stderr to stderr), exits with its status.
+# HOME is unset under Run Command; Compose warns about every ${HOME} in the file without it.
 # ponytail: output is truncated by SSM at 24,000 characters; ship logs to S3 if that bites.
 run() {
   local id cid out st
   id=$(instance)
   cid=$(aws ssm send-command --instance-ids "$id" --document-name AWS-RunShellScript \
-    --parameters "$(jq -nc --arg c "$1" '{commands: [$c]}')" \
+    --parameters "$(jq -nc --arg c "$1" '{commands: ["export HOME=/root", $c]}')" \
     --query Command.CommandId --output text)
   for _ in $(seq 1 180); do
     sleep 5
@@ -64,16 +66,18 @@ deploy() {
   tag=$(git rev-parse --short=12 HEAD)
   [ -z "$(git status --porcelain)" ] || tag=$tag-dirty-$(date +%Y%m%d%H%M%S)
   echo "== release $tag"
-  docker compose build ecommerce-api incident-api
   aws ecr get-login-password | docker login --username AWS --password-stdin "$REGISTRY" >/dev/null
   trap 'docker logout "$REGISTRY" >/dev/null' EXIT
+  # Tags are immutable: an image already in ECR is this commit's build (redeploy, rollback).
+  local built=
   for app in ecommerce-api incident-api; do
     if aws ecr describe-images --repository-name "cop/$app" --image-ids "imageTag=$tag" >/dev/null 2>&1; then
       echo "cop/$app:$tag already in ECR"
-    else
-      docker tag "cop/$app:dev" "$REGISTRY/cop/$app:$tag"
-      docker push -q "$REGISTRY/cop/$app:$tag"
+      continue
     fi
+    [ -n "$built" ] || { docker compose build ecommerce-api incident-api; built=1; }
+    docker tag "cop/$app:dev" "$REGISTRY/cop/$app:$tag"
+    docker push -q "$REGISTRY/cop/$app:$tag"
   done
   # Tracked and untracked-but-not-ignored files: .env, state and keys stay out.
   # Tracked files deleted but not yet committed are skipped (tar would fail on them).
@@ -87,6 +91,18 @@ d=/opt/cop/releases/$tag
 mkdir -p \$d
 aws --region $REGION s3 cp s3://$BUCKET/releases/$tag.tar.gz - | tar -xz -C \$d
 exec \$d/infrastructure/host/deploy.sh $tag"
+}
+
+# Back to the last release that passed deploy.sh's checks (/opt/cop/current); used when a
+# deploy fails. To go back further, deploy an older commit.
+rollback() {
+  check
+  echo "== rolling back on $(instance)"
+  run 'set -eu
+[ -L /opt/cop/current ] || { echo "no release has passed its checks yet: nothing to roll back to" >&2; exit 1; }
+d=$(readlink -f /opt/cop/current)
+echo "redeploying last good release $(basename "$d")"
+exec "$d/infrastructure/host/deploy.sh" "$(basename "$d")"'
 }
 
 tunnel() {
@@ -106,7 +122,8 @@ case ${1:-} in
   check) check ;;
   instance) instance ;;
   deploy) deploy ;;
+  rollback) rollback ;;
   tunnel) tunnel ;;
   run) [ $# -eq 2 ] || die "usage: $0 run '<script>'"; run "$2" ;;
-  *) die "usage: $0 check|instance|deploy|tunnel|run '<script>'" ;;
+  *) die "usage: $0 check|instance|deploy|rollback|tunnel|run '<script>'" ;;
 esac

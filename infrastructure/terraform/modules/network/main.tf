@@ -33,6 +33,7 @@ variable "ingress" {
 }
 
 resource "aws_vpc" "this" {
+  #checkov:skip=CKV2_AWS_11:Flow logs cost CloudWatch ingestion; the host has no inbound rules. Add with a long-lived environment.
   cidr_block           = var.cidr
   enable_dns_support   = true
   enable_dns_hostnames = true
@@ -51,6 +52,7 @@ resource "aws_internet_gateway" "this" {
 }
 
 resource "aws_subnet" "public" {
+  #checkov:skip=CKV_AWS_130:A public IP gives the host egress without a NAT gateway (~$32/month); its security group has no ingress.
   vpc_id                  = aws_vpc.this.id
   cidr_block              = var.public_subnet_cidr
   availability_zone       = var.availability_zone
@@ -75,6 +77,7 @@ resource "aws_route_table_association" "public" {
 }
 
 resource "aws_security_group" "host" {
+  #checkov:skip=CKV2_AWS_5:Attached to the host instance through the host module (security_group_id).
   name        = "${var.name}-host"
   description = "Platform host"
   vpc_id      = aws_vpc.this.id

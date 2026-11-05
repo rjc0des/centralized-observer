@@ -7,7 +7,7 @@ management for multiple applications, developed locally on OrbStack with
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 7 (deployed to real AWS, short-lived demo).** Only what is listed under
+> **Status: Phase 8 (CI/CD, security scans, deploy + rollback, backups, failure drills).** Only what is listed under
 > "Working today" has been implemented and tested. The full README is written in Phase 9.
 
 ## Working today
@@ -295,9 +295,13 @@ Alloy collects logs from every container in this compose project (and `/var/log/
    labels, so an ad-hoc `docker run cop/ecommerce-api:dev` would otherwise pose as the real
    service in Loki.
 
-1. **Redacts** `password`, `token`, `secret`, `api_key`, `authorization`… values (JSON and `key=value`) and Bearer tokens.
-2. **Parses** `level` from JSON or logfmt and lowercases it.
-3. **Labels** streams with `service`, `container`, `level`, `environment`; `trace_id` goes to
+1. **Drops replayed lines older than 1h.** A container that is stopped and started again is
+   re-read from the start of its Docker log; Loki rejects lines that far behind a stream, which
+   used to fire a critical `LokiIngestionFailure` for lines Loki already had. Counted in
+   `loki_process_dropped_lines_total{reason="too_old"}`.
+2. **Redacts** `password`, `token`, `secret`, `api_key`, `authorization`… values (JSON and `key=value`) and Bearer tokens.
+3. **Parses** `level` from JSON or logfmt and lowercases it.
+4. **Labels** streams with `service`, `container`, `level`, `environment`; `trace_id` goes to
    structured metadata, never a label, to keep cardinality bounded.
 
 ### Infrastructure as code (Terraform)
@@ -367,7 +371,7 @@ make aws-tunnel ◄── SSM port-forward ───────── Grafana :
 ```bash
 make aws-plan     # read-only; saves the plan
 make aws-apply    # applies exactly that plan (billable from here)
-make aws-deploy   # build + push images, upload the release, run it on the host
+make aws-deploy   # build + push images, upload the release, run it on the host (or: GitHub deploy workflow)
 make aws-test     # on-host health, environment labels, real IAM enforcement
 make aws-tunnel   # Grafana http://127.0.0.1:13000 (same login as local)
 make aws-destroy  # asks, then removes everything
@@ -389,12 +393,99 @@ make aws-destroy  # asks, then removes everything
   (lost with the instance), Loki on local disk, Mailpit/alert-sink instead of real email/Slack,
   the host reuses the local `.env` secret values.
 
+### CI/CD
+
+GitHub Actions run the same `make` targets as a laptop, on arm64 runners (like the Mac and
+the t4g host). Actions are pinned to commit SHAs; Docker Compose is the host's pinned,
+checksum-verified binary.
+
+| Workflow | Trigger | Does |
+|---|---|---|
+| `ci.yml` | push to `master`, every PR | `make scan`, and `make unit && make up && make health && make test` on a fresh stack with random secrets (`scripts/ci-env.sh`) |
+| `deploy.yml` | manual, with a commit/tag/branch | builds and pushes the images (skipped when ECR already has that commit), then `scripts/aws.sh deploy`. If the release fails its checks on the host, `scripts/aws.sh rollback` puts the host back on the last release that passed them |
+
+**Security scans** (`make scan`, fails on any finding):
+
+| Tool | Scans |
+|---|---|
+| Gitleaks | the whole Git history for secrets (`.gitleaksignore` lists reviewed false positives by fingerprint) |
+| Checkov | Terraform, Dockerfiles, workflows. Accepted findings are skipped **at the resource** with the reason (e.g. no KMS CMK: $1/month per key; no VPC flow logs: no ingress, demo lifetime) |
+| actionlint | workflow syntax and expressions |
+| Trivy | npm/pip lockfiles and the three built images (`cop/ecommerce-api`, `cop/incident-api`, `cop/aws-tools`), HIGH/CRITICAL with a fix available. Images are scanned from `docker save` tarballs, so Trivy never gets the Docker socket |
+
+**Deploys and rollback.** Images and release tarballs are tagged with the commit and never
+overwritten (ECR tags are immutable), so deploying an older commit **is** the rollback, and
+it is fast: the images are already in ECR. `deploy.sh` on the host waits for every
+healthcheck and every endpoint; only a release that passes becomes `/opt/cop/current` (the
+one before it is kept as `previous`). A failed release prints both migration jobs' logs.
+Migrations are forward-only, so a release must stay compatible with the schema of the one
+after it (expand, then contract) for a rollback to be safe.
+
+**GitHub → AWS without stored keys (one-time, as an admin):**
+1. IAM → Identity providers → OpenID Connect: `https://token.actions.githubusercontent.com`,
+   audience `sts.amazonaws.com`.
+2. Policy `github-cop-deploy` from `infrastructure/iam/github-deploy-policy.json`, and role
+   `github-cop-deploy` with trust policy `infrastructure/iam/github-deploy-trust.json`
+   (replace `ACCOUNT_ID` in both). The role can push `cop/*` images, upload `releases/*`, and
+   run commands only on `project=cop` instances: no Terraform, IAM, or reads of secrets. The
+   trust allows only this repository's `aws` environment. The name is outside `cop-*`, so the
+   deployer key can't modify it.
+3. GitHub → Settings → Environments → `aws`: a required reviewer, deployment branch `master`,
+   and the secret `AWS_ACCOUNT_ID`.
+
+### Backups and restore
+
+```bash
+scripts/backup.sh                  # both databases -> backups/<UTC timestamp>/ (git-ignored); online
+scripts/restore.sh backups/<ts>    # replaces both databases; the APIs are stopped meanwhile
+```
+
+- `pg_dump` custom format of `ecommerce` and `incidents`, including ownership and grants. Each
+  dump is listed back right after it is written (a truncated dump fails then, not at restore).
+- Restore runs per database in **one transaction**: a failed restore leaves the data as it was.
+- **On AWS** a systemd timer (`cop-backup.timer`, installed by every deploy) runs the backup daily
+  at 02:00 UTC and copies it to `s3://cop-aws-backups-<account>/backups/<ts>/`. The bucket is
+  versioned and the host role can't delete objects, so a compromised host can't erase backups.
+  The local copy stays in the release directory until a later deploy prunes that release.
+  Restore on the host: `scripts/restore.sh s3://cop-aws-backups-<account>/backups/<ts>`.
+- `make test` runs a restore drill (`tests/integration/backup.sh`): back up, **drop the order
+  tables** and delete marker rows, restore, then check row counts, the markers, and that the API
+  can place an order again (its role's grants came back). Proven to fail with a no-op restore
+  and with a restore that skips grants.
+- Not backed up: Prometheus and Loki data (re-collected; 30d / 72h retention) and Grafana
+  (provisioned from Git). Backups are kept as long as the bucket lives.
+
+### Failure drills
+
+`scripts/simulate.sh app-down | db-down | redis-down | loki-down` stops one component and
+times the response: alert firing → incident opened → component restarted → alert resolved
+→ incident resolved. It refuses to start while that alert is already firing. Runs on the AWS
+host too: `scripts/aws.sh run '/opt/cop/current/scripts/simulate.sh db-down'`. Configured
+email/Slack receivers are paged: that is the point of a drill.
+
+Measured 2026-11-05 (locally unless marked), seconds from the break and from the restart:
+
+| Drill | Alert (rule `for:`) | Firing | Incident opened | Alert resolved | Incident resolved |
+|---|---|---|---|---|---|
+| `app-down` | ApplicationDown (1m), critical | 85 | 116 | 10 | 55 |
+| `db-down` | DatabaseUnavailable (1m), critical | 75 | 106 | 15 | 61 |
+| `redis-down` | RedisUnavailable (1m), warning | 80 | 110 | 30 | 298 |
+| `loki-down` | EndpointDown (2m), warning | 145 | 176 | 60 | 303 |
+| `db-down` on AWS (t4g.small) | DatabaseUnavailable (1m), critical | 75 | 105 | 25 | 55 |
+
+Firing = `for:` + up to two 15s scrape/evaluation cycles; the incident follows after the
+route's `group_wait` (30s). Warnings resolve slower because their route batches
+notifications every 5 minutes (`group_interval`), critical ones every minute. The first
+drills found a real bug: restarting a container made Loki reject its replayed log and page
+a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
+
 ### Security notes (current state)
 
 - **Docker socket = root.** Alloy and cAdvisor mount `/var/run/docker.sock`. Mounting it `:ro`
   does *not* limit the Docker API (verified: a container can be created through a `:ro` mount),
   so both effectively have root on the host. Accepted for the short AWS demo (no inbound
-  ports); a socket proxy restricting them to read-only endpoints is Phase 8 hardening.
+  ports). A socket proxy would help only Alloy: cAdvisor also needs `/var/run` and
+  `/var/lib/docker` from the host, so it stays root-equivalent either way.
 - **Redaction is a safety net, not the primary control.** Alloy redacts secrets before logs
   reach Loki, but Docker's own log files (`docker logs`) still hold the original lines. The
   real rule is that applications never log secrets (enforced in the app code from Phase 3).
@@ -469,7 +560,8 @@ make doctor   # read-only toolchain check
 make unit     # app + incident API unit tests, alert rule tests, config checks, terraform fmt (in Docker, no stack needed)
 make up       # build the app, start the stack, wait for healthchecks, reload configs
 make health   # every endpoint ready + AWS CLI provably pointed at Floci
-make test     # integration tests: platform, app, incidents, alerting, Terraform on Floci (~6 min; briefly stops Redis, Postgres, incident-db)
+make test     # integration tests: platform, app, incidents, alerting, backup/restore, Terraform on Floci (~7 min; briefly stops Redis, Postgres, incident-db, both APIs)
+make scan     # Gitleaks, Checkov, actionlint, Trivy (lockfiles + images); same as CI
 make infra    # apply infrastructure/terraform/environments/local to Floci
 make load     # k6 shoppers for 2m (DURATION=5m to change); watch Grafana meanwhile
 make aws ARGS="s3 ls"

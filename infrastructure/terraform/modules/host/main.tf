@@ -75,6 +75,8 @@ resource "aws_iam_role" "this" {
 }
 
 data "aws_iam_policy_document" "host" {
+  #checkov:skip=CKV_AWS_111:Only actions without resource-level permissions use "*" (SSM agent channels, ecr:GetAuthorizationToken).
+  #checkov:skip=CKV_AWS_356:Same: those actions cannot be scoped to a resource.
   # SSM agent: Session Manager (ssmmessages) and Run Command, which deploys use
   # (ec2messages). Not AmazonSSMManagedInstanceCore: it grants ssm:GetParameter(s) on "*",
   # i.e. every secret in the account, past ReadOwnSecrets. ec2messages:DeleteMessage only
@@ -134,6 +136,8 @@ resource "aws_iam_instance_profile" "this" {
 }
 
 resource "aws_instance" "this" {
+  #checkov:skip=CKV_AWS_126:Node Exporter scrapes host metrics every 15s; detailed CloudWatch monitoring would cost extra for less.
+  #checkov:skip=CKV_AWS_135:Graviton (t4g) instances are EBS-optimized by default; the flag is a no-op.
   ami                    = data.aws_ssm_parameter.ami.insecure_value
   instance_type          = var.instance_type
   subnet_id              = var.subnet_id

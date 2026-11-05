@@ -11,7 +11,7 @@ TF_LOCAL := infrastructure/terraform/environments/local
 TF_AWS := infrastructure/terraform/environments/aws
 TFA := $(RUN) -T terraform-aws -chdir=$(TF_AWS)
 
-.PHONY: help doctor up down ps logs reload health aws tf infra unit test load clean \
+.PHONY: help doctor up down ps logs reload health aws tf infra unit scan test load clean \
 	aws-real aws-plan aws-apply aws-deploy aws-tunnel aws-test aws-destroy
 
 help: ## List targets
@@ -68,12 +68,27 @@ unit: ## Unit tests: apps (Docker test stage), alert rules (promtool), Alertmana
 	@$(RUN) --no-deps -T --entrypoint promtool -w /etc/prometheus/tests prometheus test rules alerts.test.yml
 	@$(RUN) --no-deps -T alertmanager check
 	@$(RUN) --no-deps -T terraform fmt -check -recursive infrastructure/terraform && echo "terraform fmt: ok"
+	@$(RUN) --no-deps -T --entrypoint alloy alloy fmt /etc/alloy/config.alloy | diff -u observability/alloy/config.alloy - && echo "alloy fmt: ok"
+
+# --ignore-unfixed: a CVE with no fixed version can't be acted on by bumping; it would only
+# block every build. Images are scanned from `docker save` tarballs: Trivy gets no Docker socket.
+TRIVY := --quiet --exit-code 1 --ignore-unfixed --severity HIGH,CRITICAL
+scan: ## Security scans (fail on findings): Gitleaks (Git history), Checkov (Terraform, Dockerfiles, workflows), actionlint, Trivy (lockfiles, images)
+	@$(RUN) --no-deps -T gitleaks git --redact --no-banner /work && echo "gitleaks: ok"
+	@$(RUN) --no-deps -T checkov -d /work --quiet --compact && echo "checkov: ok"
+	@$(RUN) --no-deps -T actionlint && echo "actionlint: ok"
+	@$(RUN) --no-deps -T trivy fs $(TRIVY) --scanners vuln /work && echo "trivy fs: ok"
+	@$(COMPOSE) build -q ecommerce-api incident-api aws-real
+	@d=$$(mktemp -d) && trap 'rm -rf "$$d"' EXIT && for i in ecommerce-api incident-api aws-tools; do \
+	  docker save -o "$$d/$$i.tar" "cop/$$i:dev" && \
+	  $(RUN) --no-deps -T -v "$$d:/images:ro" trivy image $(TRIVY) --input "/images/$$i.tar" && echo "trivy cop/$$i: ok" || exit 1; done
 
 test: ## Integration tests against the running stack
 	@tests/integration/observability.sh
 	@tests/integration/ecommerce.sh
 	@tests/integration/incidents.sh
 	@tests/integration/alerting.sh
+	@tests/integration/backup.sh
 	@tests/integration/infra.sh
 
 load: ## Generate shop traffic with k6, e.g. make load DURATION=5m

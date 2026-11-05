@@ -26,6 +26,7 @@ variable "rotation" {
 }
 
 resource "aws_ssm_parameter" "this" {
+  #checkov:skip=CKV_AWS_337:aws/ssm key; a customer-managed KMS key ($1/month) when key access needs its own policy or audit trail.
   for_each         = var.names
   name             = "${var.prefix}/${each.key}"
   type             = "SecureString"

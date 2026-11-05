@@ -27,9 +27,9 @@ sg=$(awsr ec2 describe-security-groups --filters Name=group-name,Values=cop-aws-
 
 # One Run Command gathers the on-host view; each line is "<key> <value>".
 remote=$(cat <<'EOF'
-cd "$(ls -1dt /opt/cop/releases/*/ | head -1)"
-dc() { docker compose -f docker-compose.yml -f docker-compose.aws.yml "$@"; }
-echo "release $(basename "$PWD")"
+cd /opt/cop/current   # .env sets COMPOSE_FILE (base + AWS override)
+dc() { docker compose "$@"; }
+echo "release $(basename "$(pwd -P)")"
 echo "unhealthy $(dc ps -a --format '{{.Service}} {{.State}} {{.Health}}' | awk '$1 !~ /migrate$/ && ($2 != "running" || ($3 != "" && $3 != "healthy")) {printf "%s,", $1}')"
 echo "migrations $(dc ps -a --format '{{.Service}} {{.State}} {{.ExitCode}}' | awk '$1 ~ /migrate$/ {printf "%s=%s/%s,", $1, $2, $3}')"
 echo "services $(dc ps --format '{{.Service}}' | wc -l)"

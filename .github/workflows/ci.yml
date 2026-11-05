@@ -1,0 +1,55 @@
+# Every push and PR: the same make targets a developer runs locally.
+# Runners are arm64 (free for public repos), like the Mac and the t4g host.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  scan:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # Gitleaks scans the whole history
+          persist-credentials: false
+      - name: Docker Compose (the AWS host's pinned version)
+        run: &compose |
+          eval "$(grep -E '^COMPOSE_(VERSION|SHA256)=' infrastructure/host/bootstrap.sh)"
+          curl -fsSL -o /tmp/docker-compose \
+            "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-aarch64"
+          echo "$COMPOSE_SHA256  /tmp/docker-compose" | sha256sum -c -
+          install -D -m 0755 /tmp/docker-compose ~/.docker/cli-plugins/docker-compose
+          docker compose version
+      - run: scripts/ci-env.sh
+      - run: make scan
+
+  test:
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Docker Compose (the AWS host's pinned version)
+        run: *compose
+      - run: scripts/ci-env.sh
+      - run: make unit
+      - run: make up
+      - run: make health
+      - run: make test
+      - name: Stack state (on failure)
+        if: failure()
+        run: |
+          docker compose ps -a
+          docker compose logs --no-color --tail 80

@@ -128,5 +128,13 @@ failed=$(( $(am_failures) - failures_before ))
 
 health_ok() { [ "$(curl -s "$APP/health" | jq -r .status 2>/dev/null)" = ok ]; }
 retry 15 2 health_ok && pass "ecommerce-api healthy again" || bad "ecommerce-api not healthy after Postgres restart"
+# A restarted container's whole Docker log is re-read; Alloy must drop lines older than
+# Loki accepts (critical LokiIngestionFailure otherwise). Only bites on a stack up > 1h.
+# Alloy's counter, not Loki's: loki_discarded_samples_total{reason="too_far_behind"} only
+# appears at the first rejection, and increase() of a new series is 0. Alloy creates every
+# reason at 0 up front; increase() also survives counter resets (restarts).
+rejected=$(prom_value "round(sum(increase(loki_write_dropped_entries_total[$(( $(date +%s) - start_epoch + 60 ))s])) or vector(0))")
+[ "$rejected" = 0 ] && pass "Loki rejected no log lines across the Postgres restart" ||
+  bad "Loki rejected ${rejected:-?} lines since the outage began (re-read container log?)"
 
 finish

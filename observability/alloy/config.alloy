@@ -61,6 +61,15 @@ loki.source.file "system" {
 loki.process "logs" {
 	forward_to = [loki.write.loki.receiver]
 
+	// 0. A stopped-then-started container is re-read from the start of its Docker log.
+	//    Loki rejects lines more than 1h behind a stream ("too far behind"), which fired a
+	//    critical LokiIngestionFailure for lines it already had. Drop them here instead;
+	//    counted in loki_process_dropped_lines_total{reason="too_old"}.
+	stage.drop {
+		older_than          = "1h"
+		drop_counter_reason = "too_old"
+	}
+
 	// 1. Redact secrets first, so nothing downstream ever sees them.
 	//    Each regex captures only the value; the capture is replaced.
 	stage.replace {

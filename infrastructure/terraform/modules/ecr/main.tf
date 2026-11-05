@@ -18,6 +18,7 @@ variable "force_delete" {
 }
 
 resource "aws_ecr_repository" "this" {
+  #checkov:skip=CKV_AWS_136:AES256 (free); KMS adds no protection for images built from a public repo.
   for_each             = var.names
   name                 = each.key
   image_tag_mutability = "IMMUTABLE"

@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# checkov:skip=CKV_DOCKER_7:The base image is an ARG pinned to tag + digest (checkov sees only the variable).
+# checkov:skip=CKV_DOCKER_2:Healthchecks are defined in docker-compose.yml, where the probe and timing live.
 ARG PYTHON_IMAGE=python:3.14.9-alpine3.24@sha256:dbeb11d16bb95c3a7e3c25c842cb9f20cbc8c18f8be0461a4a0dcc861ad386a0
 
 # Dependencies exactly as locked: every file's hash is checked, wheels only (no build step

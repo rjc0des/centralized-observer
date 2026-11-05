@@ -1,3 +1,5 @@
+# checkov:skip=CKV_DOCKER_2:One-shot CLI container, not a service.
+# checkov:skip=CKV_DOCKER_3:Runs as root to read the read-only ~/.aws mount (owned by the Mac user); one-shot, no listening port.
 # AWS CLI + Session Manager plugin for the real-AWS tooling (compose service aws-real):
 # deploys via Run Command and the port-forwarding tunnel to the host's UIs.
 # ponytail: arm64 only (the plugin rpm is per-arch); add a TARGETARCH switch for amd64 hosts.

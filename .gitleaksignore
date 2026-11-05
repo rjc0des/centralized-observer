@@ -1,0 +1,3 @@
+# Findings reviewed and accepted (Gitleaks matches by fingerprint).
+# Fake bearer token sent on purpose to prove the app never logs Authorization headers.
+ef3e390dc577a87f505f12cd8b1771bd9f24f8af:tests/integration/ecommerce.sh:curl-auth-header:205

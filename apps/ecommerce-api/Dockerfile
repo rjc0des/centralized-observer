@@ -1,4 +1,6 @@
 # syntax=docker/dockerfile:1
+# checkov:skip=CKV_DOCKER_7:The base image is an ARG pinned to tag + digest (checkov sees only the variable).
+# checkov:skip=CKV_DOCKER_2:Healthchecks are defined in docker-compose.yml, where the probe and timing live.
 ARG NODE_IMAGE=node:24.22.2-alpine3.24@sha256:8a32c8cf649a49915a66e81e7a609223c708d0adabf288ee3f4077d765542f85
 
 # Production dependencies only, installed exactly from the lockfile.

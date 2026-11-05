@@ -1,0 +1,65 @@
+{
+  "Version": "2012-10-17",
+  "Statement": [
+    {
+      "Sid": "FindTheHostAndCommandResults",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:DescribeInstances",
+        "ssm:GetCommandInvocation"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringEquals": {
+          "aws:RequestedRegion": "ap-south-1"
+        }
+      }
+    },
+    {
+      "Sid": "EcrLogin",
+      "Effect": "Allow",
+      "Action": "ecr:GetAuthorizationToken",
+      "Resource": "*"
+    },
+    {
+      "Sid": "PushOwnImages",
+      "Effect": "Allow",
+      "Action": [
+        "ecr:DescribeImages",
+        "ecr:BatchGetImage",
+        "ecr:BatchCheckLayerAvailability",
+        "ecr:InitiateLayerUpload",
+        "ecr:UploadLayerPart",
+        "ecr:CompleteLayerUpload",
+        "ecr:PutImage"
+      ],
+      "Resource": "arn:aws:ecr:ap-south-1:ACCOUNT_ID:repository/cop/*"
+    },
+    {
+      "Sid": "UploadReleases",
+      "Effect": "Allow",
+      "Action": [
+        "s3:PutObject",
+        "s3:AbortMultipartUpload"
+      ],
+      "Resource": "arn:aws:s3:::cop-aws-backups-ACCOUNT_ID/releases/*"
+    },
+    {
+      "Sid": "RunShellScriptDocument",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ssm:ap-south-1::document/AWS-RunShellScript"
+    },
+    {
+      "Sid": "OnCopInstancesOnly",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/project": "cop"
+        }
+      }
+    }
+  ]
+}

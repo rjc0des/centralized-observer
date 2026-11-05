@@ -1,0 +1,64 @@
+# Manual deploy to the AWS host: build and push the images (skipped when ECR already has
+# them), then run the release on the host via SSM Run Command (scripts/aws.sh deploy).
+# Deploying an older commit is a rollback. If the release fails its checks on the host,
+# the host is put back on the last release that passed them (scripts/aws.sh rollback).
+# Credentials: GitHub OIDC -> role github-cop-deploy (infrastructure/iam/github-deploy-*.json),
+# trusted only for this repo's "aws" environment. No stored AWS keys.
+# Terraform is not run here: plan/apply stay manual (make aws-plan / aws-apply).
+name: deploy
+
+on:
+  workflow_dispatch:
+    # checkov:skip=CKV_GHA_7:The ref input is the deploy target (any commit, so rollback needs no tag). It goes to actions/checkout only, never into a shell, and runs only after the "aws" environment approves.
+    inputs:
+      ref:
+        description: Commit, tag or branch to deploy (an older commit rolls back)
+        required: true
+        default: master
+
+permissions:
+  contents: read
+  id-token: write # OIDC token for AWS
+
+concurrency:
+  group: deploy-aws
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04-arm # arm64 images for the t4g host
+    environment: aws
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+          persist-credentials: false
+      - name: Docker Compose (the AWS host's pinned version)
+        run: |
+          eval "$(grep -E '^COMPOSE_(VERSION|SHA256)=' infrastructure/host/bootstrap.sh)"
+          curl -fsSL -o /tmp/docker-compose \
+            "https://github.com/docker/compose/releases/download/$COMPOSE_VERSION/docker-compose-linux-aarch64"
+          echo "$COMPOSE_SHA256  /tmp/docker-compose" | sha256sum -c -
+          install -D -m 0755 /tmp/docker-compose ~/.docker/cli-plugins/docker-compose
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        with:
+          role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/github-cop-deploy
+          aws-region: ap-south-1
+          role-duration-seconds: 3600
+      # scripts/aws.sh runs the CLI in the aws-real container, which reads profile "cop"
+      # from ~/.aws, as on the Mac. The session expires within the hour.
+      - name: Session credentials as profile cop
+        run: |
+          install -d -m 700 ~/.aws
+          umask 077
+          printf '[cop]\naws_access_key_id=%s\naws_secret_access_key=%s\naws_session_token=%s\n' \
+            "$AWS_ACCESS_KEY_ID" "$AWS_SECRET_ACCESS_KEY" "$AWS_SESSION_TOKEN" >~/.aws/credentials
+      - run: scripts/ci-env.sh
+        env:
+          AWS_ACCOUNT_ID: ${{ secrets.AWS_ACCOUNT_ID }}
+      - id: deploy
+        run: scripts/aws.sh deploy
+      - name: Roll back to the last good release
+        if: failure() && steps.deploy.outcome == 'failure'
+        run: scripts/aws.sh rollback

@@ -18,6 +18,10 @@ variable "force_destroy" {
 }
 
 resource "aws_s3_bucket" "this" {
+  #checkov:skip=CKV_AWS_145:SSE-S3, see the encryption block below.
+  #checkov:skip=CKV_AWS_144:Single-region demo; replicate when backups must survive a regional outage.
+  #checkov:skip=CKV_AWS_18:Access logs need a second bucket; CloudTrail data events if access must be audited.
+  #checkov:skip=CKV2_AWS_62:Nothing consumes object events.
   bucket        = var.name
   force_destroy = var.force_destroy
 }

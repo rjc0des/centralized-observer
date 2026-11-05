@@ -464,6 +464,40 @@ services:
       floci:
         condition: service_healthy
 
+  # Security scanners (`make scan`; CI runs the same target). Repo mounted read-only.
+  gitleaks:
+    image: zricethezav/gitleaks:v8.30.1@sha256:c00b6bd0aeb3071cbcb79009cb16a60dd9e0a7c60e2be9ab65d25e6bc8abbb7f
+    profiles: [tools]
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+
+  # Images are scanned from `docker save` tarballs (mounted at /images by make scan),
+  # so Trivy never gets the Docker socket.
+  trivy:
+    image: aquasec/trivy:0.76.0@sha256:2416d1f74045b57274df1a340eee6b510cacd73c66a6ccb8da092b117eb7d222
+    profiles: [tools]
+    environment:
+      TRIVY_CACHE_DIR: /cache
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+      - trivy-cache:/cache
+
+  checkov:
+    image: bridgecrew/checkov:3.3.29@sha256:3cc125b5337717b7303dbddd4e79374c120687b5ff6a24f9abdad56b562469f3
+    profiles: [tools]
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+
+  actionlint:
+    image: rhysd/actionlint:1.7.12@sha256:b1934ee5f1c509618f2508e6eb47ee0d3520686341fec936f3b79331f9315667
+    profiles: [tools]
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+
   # Real AWS (profile "aws", `make aws-*`). The ONLY services that see real credentials:
   # ~/.aws read-only, profile "cop" (the cop-deployer IAM user). Every make target checks
   # the account against AWS_ACCOUNT_ID first; Terraform's allowed_account_ids does too.
@@ -502,6 +536,7 @@ services:
 volumes:
   floci-data:
   tf-plugin-cache:
+  trivy-cache:
   prometheus-data:
   alertmanager-data:
   loki-data:
