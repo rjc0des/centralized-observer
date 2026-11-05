@@ -7,7 +7,10 @@
       "Action": [
         "ec2:Describe*",
         "ssm:DescribeParameters",
-        "ssm:DescribeInstanceInformation"
+        "ssm:DescribeInstanceInformation",
+        "ssm:GetCommandInvocation",
+        "ssm:ListCommandInvocations",
+        "ssm:ListCommands"
       ],
       "Resource": "*",
       "Condition": {
@@ -45,14 +48,7 @@
         "ec2:ModifySecurityGroupRules",
         "ec2:UpdateSecurityGroupRuleDescriptionsIngress",
         "ec2:UpdateSecurityGroupRuleDescriptionsEgress",
-        "ec2:RunInstances",
-        "ec2:TerminateInstances",
-        "ec2:StartInstances",
-        "ec2:StopInstances",
-        "ec2:ModifyInstanceAttribute",
-        "ec2:ModifyInstanceMetadataOptions",
-        "ec2:CreateTags",
-        "ec2:DeleteTags"
+        "ec2:RunInstances"
       ],
       "Resource": "*",
       "Condition": {
@@ -69,7 +65,6 @@
         "iam:GetRole",
         "iam:TagRole",
         "iam:UntagRole",
-        "iam:UpdateAssumeRolePolicy",
         "iam:GetRolePolicy",
         "iam:DeleteRolePolicy",
         "iam:ListRolePolicies",
@@ -145,8 +140,8 @@
       "Effect": "Allow",
       "Action": "ssm:StartSession",
       "Resource": [
-        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
-        "arn:aws:ssm:ap-south-1:ACCOUNT_ID:document/SSM-SessionManagerRunShell"
+        "arn:aws:ssm:ap-south-1:ACCOUNT_ID:document/SSM-SessionManagerRunShell",
+        "arn:aws:ssm:ap-south-1::document/AWS-StartPortForwardingSession"
       ]
     },
     {
@@ -185,6 +180,97 @@
         "iam:DeletePolicy"
       ],
       "Resource": "*"
+    },
+    {
+      "Sid": "DeployByRunCommand",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": [
+        "arn:aws:ssm:ap-south-1::document/AWS-RunShellScript"
+      ]
+    },
+    {
+      "Sid": "DenyRolesWithoutBoundary",
+      "Effect": "Deny",
+      "Action": [
+        "iam:CreateRole",
+        "iam:PutRolePolicy"
+      ],
+      "Resource": "*",
+      "Condition": {
+        "StringNotEquals": {
+          "iam:PermissionsBoundary": "arn:aws:iam::ACCOUNT_ID:policy/cop-host-boundary"
+        }
+      }
+    },
+    {
+      "Sid": "OwnInstancesOnly",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:TerminateInstances",
+        "ec2:StartInstances",
+        "ec2:StopInstances",
+        "ec2:ModifyInstanceAttribute",
+        "ec2:ModifyInstanceMetadataOptions"
+      ],
+      "Resource": "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "aws:ResourceTag/project": "cop"
+        }
+      }
+    },
+    {
+      "Sid": "TagInstancesOnlyAtLaunch",
+      "Effect": "Allow",
+      "Action": "ec2:CreateTags",
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:volume/*"
+      ],
+      "Condition": {
+        "StringEquals": {
+          "ec2:CreateAction": "RunInstances"
+        }
+      }
+    },
+    {
+      "Sid": "TagNetworkResources",
+      "Effect": "Allow",
+      "Action": [
+        "ec2:CreateTags",
+        "ec2:DeleteTags"
+      ],
+      "Resource": [
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:vpc/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:subnet/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:security-group/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:security-group-rule/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:internet-gateway/*",
+        "arn:aws:ec2:ap-south-1:ACCOUNT_ID:route-table/*"
+      ]
+    },
+    {
+      "Sid": "SessionManagerShellOnCopInstances",
+      "Effect": "Allow",
+      "Action": "ssm:StartSession",
+      "Resource": "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/project": "cop"
+        }
+      }
+    },
+    {
+      "Sid": "DeployByRunCommandOnCopInstances",
+      "Effect": "Allow",
+      "Action": "ssm:SendCommand",
+      "Resource": "arn:aws:ec2:ap-south-1:ACCOUNT_ID:instance/*",
+      "Condition": {
+        "StringEquals": {
+          "ssm:resourceTag/project": "cop"
+        }
+      }
     }
   ]
 }

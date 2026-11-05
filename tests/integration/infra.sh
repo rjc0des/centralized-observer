@@ -13,6 +13,15 @@ SECRETS="POSTGRES_PASSWORD ECOMMERCE_OWNER_PASSWORD ECOMMERCE_APP_PASSWORD INCID
 tf() { docker compose --progress quiet run --rm -T terraform -chdir=$ENV_DIR "$@" -input=false -no-color; }
 aws() { docker compose --progress quiet run --rm -T aws "$@" --output json; }
 
+echo "== Credentials"
+# The Floci tool containers must never see real credentials; only the profile-"aws"
+# services (aws-real, terraform-aws) mount ~/.aws.
+cfg=$(docker compose --profile tools config --format json)
+mounts=$(jq -r '[.services.aws, .services.terraform | (.volumes // [])[] | .source] | map(select(test("\\.aws"))) | join(",")' <<<"$cfg")
+envs=$(jq -r '[.services.aws, .services.terraform | .environment | keys[]] | map(select(test("PROFILE|SHARED_CREDENTIALS|SESSION_TOKEN"))) | join(",")' <<<"$cfg")
+[ -z "$mounts$envs" ] && pass "Floci aws/terraform containers mount no ~/.aws and set no profile" ||
+  bad "Floci tool containers can reach real credentials: $mounts $envs"
+
 echo "== Terraform"
 tf init >/dev/null && pass "init" || bad "terraform init failed"
 out=$(tf apply -auto-approve 2>&1) && pass "apply" || bad "apply failed: $(tail -20 <<<"$out")"
@@ -76,7 +85,8 @@ jq -e '[.Statement[] | select([.Action] | flatten | any(startswith("ssm:Get"))) 
   pass "secrets readable only under /cop/local" || bad "ssm:Get* reaches beyond /cop/local"
 wild=$(jq -r '[.Statement[] | select([.Resource] | flatten | index("*")) | .Sid] | sort | join(",")' <<<"$doc")
 [ "$wild" = EcrLogin,SessionManager ] && pass "\"*\" resources only for ECR login and Session Manager" || bad "wildcard resources in: $wild"
-risky=$(jq -r '[.Statement[].Action] | flatten | map(select(test("\\*|Delete"))) | join(",")' <<<"$doc")
+# ec2messages:DeleteMessage is exempt: it only dequeues the SSM agent's own delivered command.
+risky=$(jq -r '[.Statement[].Action] | flatten | map(select(test("\\*|Delete") and . != "ec2messages:DeleteMessage")) | join(",")' <<<"$doc")
 [ -z "$risky" ] && pass "no wildcard or delete actions (host cannot erase backups)" || bad "risky actions: $risky"
 # The boundary caps the role, so a deploy key that may create roles can't mint an admin one.
 BARN=arn:aws:iam::000000000000:policy/cop-local-host-boundary
@@ -99,8 +109,9 @@ dsg=$(aws ec2 describe-security-groups --filters Name=vpc-id,Values="$vpc" Name=
 [ "$dsg" = 0 ] && pass "default security group has no rules" || bad "default security group has $dsg rules"
 inst=$(aws ec2 describe-instances --filters Name=tag:Name,Values=cop-local Name=instance-state-name,Values=running | jq -c '[.Reservations[].Instances[]]')
 [ "$(jq length <<<"$inst")" = 1 ] && pass "one host instance running (metadata only on Floci)" || bad "$(jq length <<<"$inst") running host instances, want 1"
-[ "$(jq -r '.[0] | "\(.InstanceType) \(.MetadataOptions.HttpTokens) \(.IamInstanceProfile.Arn | split("/")[1])"' <<<"$inst")" = "t4g.small required cop-local" ] &&
-  pass "t4g.small, IMDSv2 required, host profile" || bad "instance: $(jq -c '.[0] | [.InstanceType, .MetadataOptions.HttpTokens, .IamInstanceProfile.Arn]' <<<"$inst")"
+# Hop limit 1: containers on the host must not reach IMDS (the role's credentials).
+[ "$(jq -r '.[0] | "\(.InstanceType) \(.MetadataOptions.HttpTokens) \(.MetadataOptions.HttpPutResponseHopLimit) \(.IamInstanceProfile.Arn | split("/")[1])"' <<<"$inst")" = "t4g.small required 1 cop-local" ] &&
+  pass "t4g.small, IMDSv2 required, hop limit 1, host profile" || bad "instance: $(jq -c '.[0] | [.InstanceType, .MetadataOptions.HttpTokens, .MetadataOptions.HttpPutResponseHopLimit, .IamInstanceProfile.Arn]' <<<"$inst")"
 vol=$(jq -r '.[0].BlockDeviceMappings[0].Ebs.VolumeId' <<<"$inst")
 [ "$(aws ec2 describe-volumes --volume-ids "$vol" | jq -r '.Volumes[0].Encrypted')" = true ] && pass "root volume encrypted" || bad "root volume not encrypted"
 

@@ -1,0 +1,4 @@
+- targets: [cadvisor:8080]
+  labels:
+    environment: aws
+    host: cop-aws

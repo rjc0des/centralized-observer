@@ -9,14 +9,24 @@
         "ssmmessages:CreateControlChannel",
         "ssmmessages:CreateDataChannel",
         "ssmmessages:OpenControlChannel",
-        "ssmmessages:OpenDataChannel"
+        "ssmmessages:OpenDataChannel",
+        "ec2messages:GetEndpoint",
+        "ec2messages:GetMessages",
+        "ec2messages:AcknowledgeMessage",
+        "ec2messages:SendReply",
+        "ec2messages:FailMessage",
+        "ec2messages:DeleteMessage"
       ],
       "Resource": "*"
     },
     {
       "Sid": "ReadOwnSecrets",
       "Effect": "Allow",
-      "Action": ["ssm:GetParameter", "ssm:GetParameters", "ssm:GetParametersByPath"],
+      "Action": [
+        "ssm:GetParameter",
+        "ssm:GetParameters",
+        "ssm:GetParametersByPath"
+      ],
       "Resource": "arn:aws:ssm:*:*:parameter/cop/*"
     },
     {
@@ -28,7 +38,11 @@
     {
       "Sid": "PullOwnImages",
       "Effect": "Allow",
-      "Action": ["ecr:BatchGetImage", "ecr:GetDownloadUrlForLayer", "ecr:BatchCheckLayerAvailability"],
+      "Action": [
+        "ecr:BatchGetImage",
+        "ecr:GetDownloadUrlForLayer",
+        "ecr:BatchCheckLayerAvailability"
+      ],
       "Resource": "arn:aws:ecr:*:*:repository/cop/*"
     },
     {
@@ -40,7 +54,10 @@
     {
       "Sid": "ReadWriteOwnBuckets",
       "Effect": "Allow",
-      "Action": ["s3:GetObject", "s3:PutObject"],
+      "Action": [
+        "s3:GetObject",
+        "s3:PutObject"
+      ],
       "Resource": "arn:aws:s3:::cop-*/*"
     }
   ]

@@ -1,0 +1,30 @@
+# Override for the AWS host only (infrastructure/host/deploy.sh):
+#   docker compose -f docker-compose.yml -f docker-compose.aws.yml up -d --wait
+# App images come from this account's ECR (pulled by full registry name, never Docker
+# Hub), Floci doesn't run, and Prometheus reads the aws target files.
+services:
+  floci:
+    profiles: [local-only]
+
+  ecommerce-migrate:
+    image: ${ECR_REGISTRY:?}/cop/ecommerce-api:${IMAGE_TAG:?}
+    pull_policy: missing
+
+  ecommerce-api:
+    build: !reset null
+    image: ${ECR_REGISTRY:?}/cop/ecommerce-api:${IMAGE_TAG:?}
+    pull_policy: missing
+
+  incident-migrate:
+    image: ${ECR_REGISTRY:?}/cop/incident-api:${IMAGE_TAG:?}
+    pull_policy: missing
+
+  incident-api:
+    build: !reset null
+    image: ${ECR_REGISTRY:?}/cop/incident-api:${IMAGE_TAG:?}
+    pull_policy: missing
+
+  prometheus:
+    volumes:
+      # Mounted over the local target files (the local ones say environment: local).
+      - ./observability/prometheus/targets/aws:/etc/prometheus/targets:ro

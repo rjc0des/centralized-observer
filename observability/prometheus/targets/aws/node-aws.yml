@@ -1,0 +1,5 @@
+# The EC2 host itself (node-exporter runs on it with the stack).
+- targets: [node-exporter:9100]
+  labels:
+    environment: aws
+    host: cop-aws

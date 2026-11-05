@@ -1,0 +1,23 @@
+# AWS host targets: mounted over targets/ by docker-compose.aws.yml. Same services as
+# the local files, labelled environment: aws (no Floci on AWS).
+# Each target is a URL Blackbox Exporter GETs; 2xx = up. A failing probe fires
+# EndpointDown. App health checks carry `service`, so Alertmanager can mute them while
+# ApplicationDown (same service) or DatabaseUnavailable (ecommerce-api) already explains
+# the failure.
+- targets:
+    - http://prometheus:9090/-/ready
+    - http://alertmanager:9093/-/ready
+    - http://loki:3100/ready
+    - http://alloy:12345/-/ready
+    - http://grafana:3000/api/health
+  labels:
+    environment: aws
+- targets: [http://ecommerce-api:3000/health]
+  labels:
+    environment: aws
+    service: ecommerce-api
+# 503 while incident-db is down.
+- targets: [http://incident-api:8000/health]
+  labels:
+    environment: aws
+    service: incident-api

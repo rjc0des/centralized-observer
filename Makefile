@@ -8,10 +8,14 @@ RUN := $(COMPOSE) --progress quiet run --rm
 DURATION ?= 2m
 TF_LOCAL := infrastructure/terraform/environments/local
 
-.PHONY: help doctor up down ps logs reload health aws tf infra unit test load clean
+TF_AWS := infrastructure/terraform/environments/aws
+TFA := $(RUN) -T terraform-aws -chdir=$(TF_AWS)
+
+.PHONY: help doctor up down ps logs reload health aws tf infra unit test load clean \
+	aws-real aws-plan aws-apply aws-deploy aws-tunnel aws-test aws-destroy
 
 help: ## List targets
-	@grep -E '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk -F':.*## ' '{printf "  %-8s %s\n", $$1, $$2}'
+	@grep -E '^[a-z-]+:.*## ' $(firstword $(MAKEFILE_LIST)) | awk -F':.*## ' '{printf "  %-12s %s\n", $$1, $$2}'
 
 doctor: ## Check the local toolchain (read-only)
 	@scripts/doctor.sh
@@ -74,6 +78,34 @@ test: ## Integration tests against the running stack
 
 load: ## Generate shop traffic with k6, e.g. make load DURATION=5m
 	@$(RUN) -e DURATION=$(DURATION) k6 run /scripts/ecommerce.js
+
+# --- Real AWS (profile "cop"; every target checks the account against AWS_ACCOUNT_ID) ---
+
+aws-real: ## Real AWS CLI, e.g. make aws-real ARGS="sts get-caller-identity"
+	@$(RUN) -T aws-real $(ARGS)
+
+aws-plan: ## Plan environments/aws (read-only); saves the plan that aws-apply applies
+	@scripts/aws.sh check
+	@$(TFA) init -input=false -no-color >/dev/null
+	@$(TFA) plan -input=false -no-color -out=tfplan
+
+aws-apply: ## Apply exactly the plan saved by aws-plan (creates billable resources)
+	@scripts/aws.sh check
+	@$(TFA) apply -input=false -no-color tfplan
+
+aws-deploy: ## Build, push and start the stack on the AWS host
+	@scripts/aws.sh deploy
+
+aws-tunnel: ## Grafana :13000, Prometheus :19090, Alertmanager :19093 on 127.0.0.1 via SSM
+	@scripts/aws.sh tunnel
+
+aws-test: ## Integration checks against the AWS deployment (incl. real IAM enforcement)
+	@tests/integration/aws.sh
+
+aws-destroy: ## Destroy environments/aws: host, its data, images, secrets (asks first)
+	@read -rp "Destroy the AWS environment (host and its data, images, secrets)? [y/N] " a; \
+	  if [ "$$a" = y ]; then scripts/aws.sh check && $(TFA) destroy -auto-approve -input=false -no-color; \
+	  else echo "aborted, nothing destroyed"; fi
 
 clean: ## Stop the stack and DELETE its volumes (asks first)
 	@read -rp "Delete all cop volumes (metrics, logs, Grafana, Postgres, Floci data, plugin cache)? [y/N] " a; \

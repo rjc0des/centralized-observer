@@ -43,6 +43,12 @@ variable "permissions_boundary" {
   type = string
 }
 
+# Cloud-init script run once at first boot (installs Docker); null on Floci.
+variable "user_data" {
+  type    = string
+  default = null
+}
+
 data "aws_partition" "current" {}
 data "aws_region" "current" {}
 data "aws_caller_identity" "current" {}
@@ -69,15 +75,18 @@ resource "aws_iam_role" "this" {
 }
 
 data "aws_iam_policy_document" "host" {
-  # Session Manager only, AWS's documented minimum. Not AmazonSSMManagedInstanceCore: it
-  # grants ssm:GetParameter(s) on "*", i.e. every secret in the account, past ReadOwnSecrets.
-  # ponytail: no Run Command (ec2messages:*); add it if deploys ever use SSM commands.
+  # SSM agent: Session Manager (ssmmessages) and Run Command, which deploys use
+  # (ec2messages). Not AmazonSSMManagedInstanceCore: it grants ssm:GetParameter(s) on "*",
+  # i.e. every secret in the account, past ReadOwnSecrets. ec2messages:DeleteMessage only
+  # removes the agent's own delivered command from its queue.
   statement {
     sid = "SessionManager"
     actions = [
       "ssm:UpdateInstanceInformation",
       "ssmmessages:CreateControlChannel", "ssmmessages:CreateDataChannel",
       "ssmmessages:OpenControlChannel", "ssmmessages:OpenDataChannel",
+      "ec2messages:GetEndpoint", "ec2messages:GetMessages", "ec2messages:AcknowledgeMessage",
+      "ec2messages:SendReply", "ec2messages:FailMessage", "ec2messages:DeleteMessage",
     ]
     resources = ["*"]
   }
@@ -130,11 +139,14 @@ resource "aws_instance" "this" {
   subnet_id              = var.subnet_id
   vpc_security_group_ids = [var.security_group_id]
   iam_instance_profile   = aws_iam_instance_profile.this.name
+  user_data              = var.user_data
 
-  # IMDSv2 only; hop limit 2 so containers on the host can reach it too.
+  # IMDSv2 only, hop limit 1: only the host itself (deploy.sh) gets the role's credentials.
+  # With 2, any bridge-networked container could fetch them (verified on AWS) and read
+  # every secret under the host's SSM path.
   metadata_options {
     http_tokens                 = "required"
-    http_put_response_hop_limit = 2
+    http_put_response_hop_limit = 1
   }
 
   root_block_device {
@@ -146,9 +158,10 @@ resource "aws_instance" "this" {
   # All platform data (Prometheus, Loki, Postgres volumes) lives on this root volume and
   # is deleted with the instance: any replacement (-replace, taint, subnet change) loses it.
   # ponytail: one volume; add a separate EBS data volume or prevent_destroy in Phase 7.
-  # A newer AMI alone must not trigger that replacement.
+  # A newer AMI alone must not trigger that replacement. user_data runs only at first boot:
+  # an edit would stop/start the host and still not run, so it applies to new hosts only.
   lifecycle {
-    ignore_changes = [ami]
+    ignore_changes = [ami, user_data]
   }
 
   tags = { Name = var.name }

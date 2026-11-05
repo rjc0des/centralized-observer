@@ -7,7 +7,7 @@ management for multiple applications, developed locally on OrbStack with
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 6 (Terraform, verified on Floci).** Only what is listed under
+> **Status: Phase 7 (deployed to real AWS, short-lived demo).** Only what is listed under
 > "Working today" has been implemented and tested. The full README is written in Phase 9.
 
 ## Working today
@@ -33,6 +33,7 @@ Inspired by Uber Engineering's
 | Floci (AWS emulator) | `2.4.0` | http://127.0.0.1:4566 | State persisted in the `floci-data` volume |
 | AWS CLI | `2.38.6` | — | Container, hardwired to Floci with fake credentials |
 | Terraform | `1.16.7`, AWS provider `6.71.0` | — | Container, Floci credentials, shared plugin cache; lock file committed |
+| AWS tools (real AWS) | AWS CLI `2.38.6` + Session Manager plugin `1.2.896.0` | — | `aws-real` / `terraform-aws` containers, the only ones that read `~/.aws` (profile `cop`) |
 
 All images are pinned by tag and multi-arch digest. No `latest` tags.
 Everything published binds to `127.0.0.1`; exporters are only reachable inside the Docker network.
@@ -336,14 +337,64 @@ infrastructure/terraform/
 | VPC | VPC + DNS attributes, subnet, IGW, route table + route, SG rules (`aws_vpc_security_group_*_rule`), default SG | `ModifySecurityGroupRules` returns true and changes nothing (Terraform then shows drift: change a rule by replacing it). After the default egress rule is revoked, `describe-security-group-rules` still lists it while `describe-security-groups` doesn't (tests read the latter) |
 | EC2 | describe images/AZs/instance types, run/terminate, IMDSv2 options, encrypted root volume | **Metadata only** without a Docker socket: no container, UserData or SSM commands (experimental; workloads run in Compose) |
 
-Not verified, so not claimed: real network isolation, IAM enforcement, ECR image push, deletion of ECR repositories.
+Not verified on Floci, so not claimed there: real network isolation, IAM enforcement, ECR image
+push, deletion of ECR repositories. The AWS deployment below verifies the first three on real AWS.
+
+### Deploying to AWS
+
+The same stack runs on one Graviton instance in `ap-south-1`, as a short-lived demo: apply,
+deploy, verify, destroy. The host has **no inbound ports**; humans reach the UIs through an SSM
+Session Manager port-forward.
+
+```
+Mac                                       AWS ap-south-1 (VPC, one public subnet, no ingress)
+make aws-deploy ── ECR push (2 app images) ──► ECR (immutable tags = commit)
+                ── release tarball ─────────► S3 releases/<tag>.tar.gz
+                ── SSM Run Command ─────────► t4g.small host: deploy.sh
+                                                .env from SSM /cop/aws (SecureString)
+                                                docker compose -f docker-compose.yml -f docker-compose.aws.yml up
+make aws-tunnel ◄── SSM port-forward ───────── Grafana :3000, Prometheus :9090, Alertmanager :9093
+  127.0.0.1:13000 / :19090 / :19093
+```
+
+**One-time account setup (as an admin, in the console):**
+1. Root MFA; a monthly budget with alerts (untick *Credits* so it tracks real usage).
+2. Two customer-managed policies from `infrastructure/iam/` (replace `ACCOUNT_ID`):
+   `cop-host-boundary` and `cop-deployer`.
+3. An IAM user with **only** `cop-deployer` attached and an access key, stored as profile
+   `cop` in `~/.aws/credentials`. Set `AWS_ACCOUNT_ID` in `.env`.
+
+```bash
+make aws-plan     # read-only; saves the plan
+make aws-apply    # applies exactly that plan (billable from here)
+make aws-deploy   # build + push images, upload the release, run it on the host
+make aws-test     # on-host health, environment labels, real IAM enforcement
+make aws-tunnel   # Grafana http://127.0.0.1:13000 (same login as local)
+make aws-destroy  # asks, then removes everything
+```
+
+- **Credential isolation:** only the `aws-real` and `terraform-aws` containers mount `~/.aws`
+  (read-only, profile `cop`); every `make aws-*` target first checks the account against
+  `AWS_ACCOUNT_ID`, and Terraform's `allowed_account_ids` does too. `infra.sh` fails if the
+  Floci containers ever mount `~/.aws`.
+- **No admin-role escalation:** the deployer may create `cop-*` roles only with
+  `cop-host-boundary` attached (and an explicit Deny otherwise), so a leaked deploy key can't
+  mint a role wider than the host's own. `make aws-test` proves it on real IAM.
+- **Host role, enforced by real IAM** (checked by `make aws-test`): reads secrets only under
+  `/cop/aws`, pulls only `cop/*` images, reads/writes but never deletes objects in its bucket.
+- **Free account plan:** only free-tier instance types launch; `t4g.small` (2 GiB) is the
+  largest arm64 one, so the host adds 2 GiB swap (stack ≈1 GiB). Creating an AWS Organization
+  (e.g. for IAM Identity Center) upgrades the account to paid and **forfeits free-plan credits**.
+- **Demo shortcuts** (`ponytail:` in the code): local Terraform state, data on the root volume
+  (lost with the instance), Loki on local disk, Mailpit/alert-sink instead of real email/Slack,
+  the host reuses the local `.env` secret values.
 
 ### Security notes (current state)
 
 - **Docker socket = root.** Alloy and cAdvisor mount `/var/run/docker.sock`. Mounting it `:ro`
   does *not* limit the Docker API (verified: a container can be created through a `:ro` mount),
-  so both effectively have root on the host. Acceptable on a laptop; before the AWS deployment
-  a socket proxy will restrict them to read-only container endpoints.
+  so both effectively have root on the host. Accepted for the short AWS demo (no inbound
+  ports); a socket proxy restricting them to read-only endpoints is Phase 8 hardening.
 - **Redaction is a safety net, not the primary control.** Alloy redacts secrets before logs
   reach Loki, but Docker's own log files (`docker logs`) still hold the original lines. The
   real rule is that applications never log secrets (enforced in the app code from Phase 3).
@@ -354,9 +405,10 @@ Not verified, so not claimed: real network isolation, IAM enforcement, ECR image
 - **Incident API:** every write needs the bearer token (Alertmanager sends it); reads are
   open, fine on `127.0.0.1`. One shared token, and `actor` is whoever the caller says:
   per-user authentication comes before anyone outside the team can reach it.
-- **Deferred to the AWS phase:** the API serves `/metrics` on its public port (fine on
-  `127.0.0.1`, not behind a public load balancer), and secrets are environment variables
-  (visible in `docker inspect`); both move behind a private port / AWS SSM in Phase 7.
+- **`/metrics` and secrets:** the API serves `/metrics` on its own port; on AWS no port is
+  reachable from outside (no inbound rules), so it's moot until a load balancer is added. On
+  AWS the secrets' source of truth is SSM (SecureString), but containers still receive them as
+  environment variables (visible to root via `docker inspect`).
 - **Log `level` label is allowlisted** to `debug|info|warn|error|fatal` (`warning`→`warn`,
   `err`→`error`, `critical`/`panic`→`fatal`); any other value gets no label, so free text
   can't create new label values.
@@ -431,7 +483,8 @@ The `aws` and `terraform` containers set `AWS_ACCESS_KEY_ID=test`,
 `AWS_ENDPOINT_URL=http://floci:4566` and never mount `~/.aws`. Even with the
 endpoint removed, the fake keys are rejected by real AWS. `make health` asserts
 the caller account is Floci's `000000000000`, and the local Terraform provider refuses
-any other account (`allowed_account_ids`).
+any other account (`allowed_account_ids`). Real AWS goes through separate containers
+(`aws-real`, `terraform-aws`); see "Deploying to AWS".
 
 ## Environment variables
 

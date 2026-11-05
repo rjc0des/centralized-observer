@@ -450,7 +450,7 @@ services:
       TF_IN_AUTOMATION: "1"
       # Secrets for environments/local's SSM parameters (write-only: never in state).
       # JSON-safe because .env.example asks for hex/base64 values.
-      TF_VAR_secrets: >-
+      TF_VAR_secrets: &tf-secrets >-
         {"POSTGRES_PASSWORD":"${POSTGRES_PASSWORD}","ECOMMERCE_OWNER_PASSWORD":"${ECOMMERCE_OWNER_PASSWORD}",
         "ECOMMERCE_APP_PASSWORD":"${ECOMMERCE_APP_PASSWORD}","INCIDENT_DB_PASSWORD":"${INCIDENT_DB_PASSWORD}",
         "INCIDENT_OWNER_PASSWORD":"${INCIDENT_OWNER_PASSWORD}","INCIDENT_APP_PASSWORD":"${INCIDENT_APP_PASSWORD}",
@@ -463,6 +463,41 @@ services:
     depends_on:
       floci:
         condition: service_healthy
+
+  # Real AWS (profile "aws", `make aws-*`). The ONLY services that see real credentials:
+  # ~/.aws read-only, profile "cop" (the cop-deployer IAM user). Every make target checks
+  # the account against AWS_ACCOUNT_ID first; Terraform's allowed_account_ids does too.
+  aws-real:
+    build: ./infrastructure/aws-tools
+    image: cop/aws-tools:dev
+    pull_policy: build   # local-only name, like the app images
+    profiles: [aws]
+    # The SSM tunnel listens on 127.0.0.1; OrbStack exposes host-network ports on the Mac.
+    network_mode: host
+    environment: &real-aws
+      AWS_PROFILE: cop
+      AWS_REGION: ${AWS_REGION:-ap-south-1}
+    working_dir: /work
+    volumes:
+      - ./:/work
+      - ${HOME}/.aws:/root/.aws:ro
+
+  terraform-aws:
+    image: hashicorp/terraform:1.16.7@sha256:c9c77f5b9820832cbc7b88d16df406ac6e75fee5a9077e5437db0c54e5ff33e3
+    profiles: [aws]
+    environment:
+      <<: *real-aws
+      TF_PLUGIN_CACHE_DIR: /plugin-cache
+      TF_IN_AUTOMATION: "1"
+      TF_VAR_account_id: ${AWS_ACCOUNT_ID:-}
+      # ponytail: the AWS host reuses the local .env secret values; give it its own set
+      # (a second env file) if it ever holds real data.
+      TF_VAR_secrets: *tf-secrets
+    working_dir: /work
+    volumes:
+      - ./:/work
+      - tf-plugin-cache:/plugin-cache
+      - ${HOME}/.aws:/root/.aws:ro
 
 volumes:
   floci-data:

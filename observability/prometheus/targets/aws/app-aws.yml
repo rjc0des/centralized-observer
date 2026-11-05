@@ -1,0 +1,8 @@
+- targets: [ecommerce-api:3000]
+  labels:
+    environment: aws
+    service: ecommerce-api
+- targets: [incident-api:8000]
+  labels:
+    environment: aws
+    service: incident-api
