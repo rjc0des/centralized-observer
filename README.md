@@ -428,7 +428,9 @@ after it (expand, then contract) for a rollback to be safe.
    `github-cop-deploy` with trust policy `infrastructure/iam/github-deploy-trust.json`
    (replace `ACCOUNT_ID` in both). The role can push `cop/*` images, upload `releases/*`, and
    run commands only on `project=cop` instances: no Terraform, IAM, or reads of secrets. The
-   trust allows only this repository's `aws` environment. The name is outside `cop-*`, so the
+   trust allows only this repository's `aws` environment. GitHub's `sub` claim carries the
+   owner and repository **IDs** (`repo:rjc0des@47665982/centralized-observer@1442905418:environment:aws`),
+   so a re-created repository with the same name doesn't match; a fork must change them. The name is outside `cop-*`, so the
    deployer key can't modify it.
 3. GitHub → Settings → Environments → `aws`: a required reviewer, deployment branch `master`,
    and the secret `AWS_ACCOUNT_ID`.

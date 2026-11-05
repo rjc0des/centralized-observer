@@ -11,7 +11,7 @@
       "Condition": {
         "StringEquals": {
           "token.actions.githubusercontent.com:aud": "sts.amazonaws.com",
-          "token.actions.githubusercontent.com:sub": "repo:rjc0des/centralized-observer:environment:aws"
+          "token.actions.githubusercontent.com:sub": "repo:rjc0des@47665982/centralized-observer@1442905418:environment:aws"
         }
       }
     }
