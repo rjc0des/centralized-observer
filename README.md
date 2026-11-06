@@ -1,16 +1,194 @@
 # Centralized Observability Platform
 
-A hybrid-cloud observability platform: metrics, logs, alerting, SLOs and incident
-management for multiple applications, developed locally on OrbStack with
-[Floci](https://github.com/floci-io/floci) emulating AWS APIs, and validated on AWS (`ap-south-1`).
+[![CI](https://github.com/rjc0des/centralized-observer/actions/workflows/ci.yml/badge.svg)](https://github.com/rjc0des/centralized-observer/actions/workflows/ci.yml)
+
+A working observability platform for a small fleet of services: metrics, logs, alerting,
+SLOs with error budgets, and an incident service that turns alerts into deduplicated,
+correlated incidents. It runs as one Docker Compose project on a laptop, with AWS APIs
+emulated by [Floci](https://github.com/floci-io/floci), and the same stack is deployed to
+AWS (`ap-south-1`) by GitHub Actions with OIDC, health-gated releases and rollback to the last good release.
 
 Inspired by Uber Engineering's
 [From Monitoring to Observability: Our Ultra-Marathon to a Cloud-Native Platform](https://www.uber.com/in/en/blog/from-monitoring-to-observability-cloud-native/).
 
-> **Status: Phase 8 (CI/CD, security scans, deploy + rollback, backups, failure drills).** Only what is listed under
-> "Working today" has been implemented and tested. The full README is written in Phase 9.
+![Architecture: sources feed Prometheus and, through Alloy, Loki; Prometheus alerts go to Alertmanager, which notifies email, Slack and the incident API; Grafana reads Prometheus, Loki and Alertmanager](docs/architecture.svg)
 
-## Working today
+## What it demonstrates
+
+- **Signals with bounded cardinality.** RED metrics, dependency and pool gauges, structured
+  JSON logs with `trace_id` (kept out of labels), host, container and probe metrics.
+  Route templates and enums only: a unit test fails if an order ID reaches a label.
+- **Alerting that pages for causes.** 16 alerts, each with a promtool firing case and a
+  near miss. Alertmanager routes by severity and inhibits symptoms: while Postgres is down
+  and DatabaseUnavailable fires, the 5xx, burn-rate and health-check alerts it causes are
+  muted. A symptom that fires before its cause still pages; correlation then joins the two.
+- **SLOs with multi-window burn rates.** Availability, latency and log freshness, with error
+  budgets computed over the data Prometheus actually holds. Availability and latency have
+  fast and slow burn-rate alerts, as in the Google SRE workbook.
+- **Incident management without guesswork.** A FastAPI service with its own Postgres:
+  webhook deduplication, rule-based correlation (the same cause → symptom pairs as the
+  inhibit rules), lifecycle, Markdown reports, MTTA/MTTR. It keeps accepting alerts while
+  its database is down and recovers resolutions Alertmanager forgot after a restart.
+- **Infrastructure as code, verified twice.** Terraform modules applied to Floci with a
+  required empty second plan, then to real AWS: no inbound ports, Session Manager only,
+  secrets in SSM and never in Terraform state, least-privilege IAM proven against real IAM.
+- **Delivery and recovery.** CI runs the same `make` targets as the laptop on arm64
+  runners, plus Gitleaks, Checkov, actionlint and Trivy. Deploys are immutable releases;
+  one that fails its checks is rolled back to the last good release (52 s, measured with a
+  deliberately broken release). Daily backups go to a versioned
+  bucket the host can't delete from; a restore drill runs in every test run.
+- **Evidence, not claims.** `make test` runs 200 integration checks against the live stack.
+  A new check isn't trusted until it has been seen failing with its fix reverted. Failure
+  drills time the whole path from a broken component to a resolved incident.
+
+## Screenshots
+
+Taken from the local stack during a real drill: 10 simulated shoppers (`make load`), then
+Postgres stopped for five minutes.
+
+| | |
+|---|---|
+| ![Overview dashboard during a Postgres outage](docs/screenshots/overview.png) | ![E-commerce API dashboard during the same outage](docs/screenshots/ecommerce-api.png) |
+| **Overview, during the outage.** Two critical alerts and a warning fire in Prometheus; Alertmanager inhibits the symptoms, so one incident opens and one email goes out. Budgets are negative because this stack's three days of data hold `make test` runs (deliberate 500s) and this drill. | **E-commerce API.** `/products` 200s turn into 500s and back; exceptions by type (`ENOTFOUND`: Docker drops a stopped container's DNS name); p50/p95/p99 latency. |
+| ![SLO dashboard with burn rates](docs/screenshots/slo.png) | ![Telemetry pipeline dashboard](docs/screenshots/pipeline.png) |
+| **SLOs and error budgets.** 100% errors against a 0.1% budget is a 1000× burn. The window holds 3.1 days of data, and budgets use exactly that. | **The platform watching itself.** Ingestion, notifications per integration (email, Slack, webhook), alert states (active vs suppressed), log volume and errors by service. |
+| ![Alert email in Mailpit](docs/screenshots/alert-email.png) | ![Loki logs in Grafana Explore](docs/screenshots/logs.png) |
+| **The page.** The critical email, caught by Mailpit locally (real SMTP when configured). The incident API got the same alert by webhook. | **Logs.** The API's JSON error lines in Loki: route template, status, `trace_id`; never bodies, headers or credentials. |
+
+<details>
+<summary>Infrastructure dashboard</summary>
+
+![Infrastructure dashboard](docs/screenshots/infrastructure.png)
+
+Host CPU, memory, disk and I/O (locally the OrbStack VM), per-container CPU and memory.
+</details>
+
+## Quick start
+
+Developed on macOS on Apple Silicon with [OrbStack](https://orbstack.dev) (Docker Engine and
+Compose v2); CI runs the same commands on Ubuntu arm64. Also needs `make`, `curl`, `git`,
+`jq` and `openssl`. Terraform, the AWS CLI and k6 run as pinned containers.
+
+```bash
+cp .env.example .env    # fill in the secrets; .env.example says how to generate them
+make doctor             # read-only toolchain check
+make up                 # build, start, wait for healthchecks, load configs
+make health             # every endpoint ready, AWS CLI provably pointed at Floci
+make test               # 200 integration checks (a few minutes; stops and restarts Postgres, Redis, incident-db, both APIs)
+make load               # 10 simulated shoppers for ~2.5 minutes; open Grafana meanwhile
+```
+
+Then open Grafana at http://127.0.0.1:3000 (login from `.env`, dashboards in the **COP**
+folder), or break something: `scripts/simulate.sh db-down` and watch the alert, the email in
+[Mailpit](http://127.0.0.1:8025) and the incident at http://127.0.0.1:8081/incidents.
+
+```bash
+make unit     # app unit tests, promtool rule tests, config checks, fmt (no stack needed)
+make scan     # Gitleaks, Checkov, actionlint, Trivy; the same as CI
+make infra    # apply the Terraform environment to Floci
+make down     # stop, keep data; `make clean` deletes volumes after asking
+make help     # everything else, including the make aws-* targets
+```
+
+## An outage, end to end
+
+What happened in the drill above (times from the incident's own timeline):
+
+```mermaid
+sequenceDiagram
+  participant P as Prometheus
+  participant A as Alertmanager
+  participant I as incident-api
+  participant D as incident-db
+  Note over P: 14:44:32 Postgres stopped
+  P->>A: 14:45:38 DatabaseUnavailable firing (+66 s: for 1m + evaluation)
+  Note over A: ErrorBudgetFastBurn and EndpointDown<br/>fire too, inhibited (not sent)
+  A->>I: webhook after group_wait (30 s)
+  I->>D: incident 343, opened_at = the alert's start
+  A-->>A: email + Slack (critical route)
+  Note over P: 14:49:39 Postgres started
+  P->>A: 14:49:53 resolved (+14 s)
+  A->>I: resolved notification
+  I->>D: incident auto-resolved, resolved_at = the alert's end
+```
+
+`GET /incidents/343/report` afterwards (abridged):
+
+```markdown
+# Incident 343: Postgres is unavailable
+
+| Status | resolved |
+| Severity | critical |
+| Opened | 2026-11-05 14:45:38 UTC |
+| Resolved | 2026-11-05 14:49:53 UTC (after 4m 15s) |
+| Probable cause | DatabaseUnavailable: Postgres is unavailable |
+
+## Timeline
+
+| Time | Who | What |
+|---|---|---|
+| 2026-11-05 14:45:38 UTC | alertmanager | alert_firing: DatabaseUnavailable (critical) firing: Postgres is unavailable [opened the incident] |
+| 2026-11-05 14:49:53 UTC | alertmanager | alert_resolved: DatabaseUnavailable resolved |
+| 2026-11-05 14:49:53 UTC | alertmanager | resolved: all alerts resolved |
+```
+
+The same path is timed for four components in [Failure drills](#failure-drills).
+
+The drill also shows a known gap: 13 s after incident 343 resolved, a second incident
+(344) opened for HighHTTPErrorRate and ErrorBudgetFastBurn. Their 5-minute and longer
+windows still held the outage's errors, and once DatabaseUnavailable had resolved nothing
+inhibited them. Correlation joins only unresolved incidents, so they paged on their own
+after recovery (see [Known local limitations](#known-local-limitations)).
+
+## What testing found
+
+Each of these looked correct in the code and was found by running the system, a failure
+drill, a check built to fail first, or an independent review:
+
+- **Alerts lost while the incident database was down.** The webhook answered 503 and
+  Alertmanager retried, but it sends a receiver "resolved" only if that receiver got
+  "firing": an alert that fired and cleared during the outage vanished (Mailpit had both
+  emails, the incident API nothing). Fix: spool to a volume, answer 200, replay in order.
+- **Incidents stuck open after a restart.** Alertmanager keeps alerts in memory, so an
+  alert that cleared during `make down && make up` never got its "resolved". Fix: every
+  15 s the API compares its firing alerts with Alertmanager's and resolves ones missing
+  for 10 minutes (longer than any group interval, so real resolutions win).
+- **Every container restart paged a critical alert.** Alloy re-reads a restarted
+  container's log from the start; Loki rejected the old lines and `LokiIngestionFailure`
+  fired. Found by the failure drills. Fix: drop lines older than 1 h in Alloy (234
+  rejections without the stage, 0 with it).
+- **Every container could act as the host.** An IMDS hop limit of 2 let Grafana's
+  container fetch the instance role's credentials on AWS (verified). Fix: hop limit 1,
+  asserted by `infra.sh` and `make aws-test`.
+- **Least privilege bypassed twice.** `AmazonSSMManagedInstanceCore` grants
+  `ssm:GetParameter` on `*`, past the scoped inline policy (found by an independent review),
+  and a hand-attached `AdministratorAccess` silently overrode the deploy policy (caught by a
+  check that must fail to create a role without the permissions boundary). Fixes: no
+  managed policies on the host role, explicit Denies in the deploy policy.
+- **Tests that couldn't fail.** `min(probe_success)` passed with probes missing; a race
+  test with 20 parallel requests never overlapped (now a psql session holds a table lock so
+  they must: without the advisory lock they made 20 incidents). Since then a check counts
+  only after it has been seen failing with its fix reverted.
+
+## Repository layout
+
+```
+apps/ecommerce-api/        sample workload: Node.js 24, Fastify 5, Postgres, Redis, OTel trace IDs
+apps/incident-api/         incident service: Python 3.14, FastAPI, own Postgres, correlation rules
+observability/             Prometheus (rules, promtool tests, file_sd targets), Alertmanager,
+                           Alloy, Loki, Blackbox, Grafana (provisioned datasources + dashboards)
+infrastructure/terraform/  modules (network, storage, ecr, secrets, host) + environments local/aws
+infrastructure/iam/        policies an admin creates by hand: host boundary, deployer, GitHub OIDC role
+infrastructure/host/       EC2 bootstrap and deploy.sh (health-gated release, rollback links, backups)
+tests/integration/         the suites behind make test; tests/load/ the k6 profile
+scripts/                   doctor, reload, backup/restore, failure drills, aws.sh
+.github/workflows/         ci.yml (scan + full stack test), deploy.yml (manual, OIDC, auto-rollback)
+docker-compose.yml         every service; third-party images pinned by tag + multi-arch digest
+```
+
+## Reference
+
+### Components
 
 | Component | Version | Local URL | Notes |
 |---|---|---|---|
@@ -146,19 +324,17 @@ Rules: [`alerts.yml`](observability/prometheus/rules/alerts.yml) and
   and email receivers, checks every link in the email opens, then checks the recovery
   notifications and that the incident auto-resolved. With real email/Slack settings
   in `.env` that outage step is skipped (it would page people) and reported as `SKIP`.
-  Running `make test` twice within 15 minutes fires ContainerRestarting (warning): each run
-  restarts the API once.
+  One `make test` fires ContainerRestarting (warning) for ecommerce-api: it restarts the API
+  twice (a clean-restart check and the restore drill).
 
 ### Incident management
 
 [`apps/incident-api`](apps/incident-api) receives Alertmanager's webhook and turns alerts
 into incidents, stored in its own Postgres (`incident-db`).
 
-```
-Prometheus ─▶ Alertmanager ─▶ webhook (Bearer token) ─▶ incident API ─▶ incident-db
-                                                             │
-                     people: acknowledge / resolve / notes ──┘   reports, metrics
-```
+Alertmanager → webhook (bearer token) → incident API → incident-db; people acknowledge,
+resolve and add notes through the same API. A real run is drawn in
+[An outage, end to end](#an-outage-end-to-end).
 
 - **Deduplication.** One alert firing = `(fingerprint, startsAt)`, unique in the database.
   Alertmanager re-sends notifications (every group change, and hourly/4-hourly while
@@ -187,7 +363,7 @@ Prometheus ─▶ Alertmanager ─▶ webhook (Bearer token) ─▶ incident API
   incident while someone resolves it. An auto-resolved incident's end is its alerts'
   latest end, whatever order the notifications arrived in.
   Severity is the highest of its alerts; a raise is logged. The timeline is append-only:
-  the API's database role can insert events but not change or delete anything.
+  the API's database role can insert timeline events but not change or delete them.
 - **Writes** (webhook, acknowledge, resolve, notes) need `Authorization: Bearer $INCIDENT_API_TOKEN`,
   checked before the request body is read; people also give an `actor` name. An alert
   without an `alertname` is skipped (and counted), not a reason to reject the whole
@@ -289,7 +465,7 @@ config with the tool's own checker first and fails if any service doesn't load i
 ### Log pipeline
 
 Alloy collects logs from every container in this compose project (and `/var/log/syslog`,
-`kern.log`, `auth.log` on Linux hosts), then:
+`kern.log`, `auth.log` on hosts that write them, e.g. Ubuntu), then:
 
 0. **Keeps only Compose-named containers** (`cop-*`). Compose-built images carry the project
    labels, so an ad-hoc `docker run cop/ecommerce-api:dev` would otherwise pose as the real
@@ -350,15 +526,27 @@ The same stack runs on one Graviton instance in `ap-south-1`, as a short-lived d
 deploy, verify, destroy. The host has **no inbound ports**; humans reach the UIs through an SSM
 Session Manager port-forward.
 
-```
-Mac                                       AWS ap-south-1 (VPC, one public subnet, no ingress)
-make aws-deploy ── ECR push (2 app images) ──► ECR (immutable tags = commit)
-                ── release tarball ─────────► S3 releases/<tag>.tar.gz
-                ── SSM Run Command ─────────► t4g.small host: deploy.sh
-                                                .env from SSM /cop/aws (SecureString)
-                                                docker compose -f docker-compose.yml -f docker-compose.aws.yml up
-make aws-tunnel ◄── SSM port-forward ───────── Grafana :3000, Prometheus :9090, Alertmanager :9093
-  127.0.0.1:13000 / :19090 / :19093
+```mermaid
+flowchart TB
+  subgraph gh["GitHub"]
+    ci["ci.yml on every push and PR<br/>make scan · unit · up · health · test"]
+    dep["deploy.yml, manual, required reviewer"]
+  end
+  dep -- "OIDC: short-lived credentials" --> role["IAM role github-cop-deploy<br/>push images · upload releases · run commands on project=cop"]
+  subgraph aws["AWS ap-south-1"]
+    ecr["ECR: cop/* images,<br/>immutable tag = commit"]
+    s3["S3: releases/&lt;tag&gt;.tar.gz,<br/>daily backups/"]
+    ssm["SSM Parameter Store:<br/>/cop/aws/* SecureString"]
+    host["EC2 t4g.small: deploy.sh<br/>compose up, check every endpoint<br/>pass: current · fail: roll back"]
+  end
+  role --> ecr
+  role --> s3
+  role -- "SSM Run Command" --> host
+  ecr -- pull --> host
+  s3 -- release --> host
+  ssm -- ".env at deploy" --> host
+  host -- "pg_dump 02:00 UTC" --> s3
+  mac["Mac: make aws-tunnel"] -. "Session Manager port-forward" .-> host
 ```
 
 **One-time account setup (as an admin, in the console):**
@@ -389,7 +577,7 @@ make aws-destroy  # asks, then removes everything
 - **Free account plan:** only free-tier instance types launch; `t4g.small` (2 GiB) is the
   largest arm64 one, so the host adds 2 GiB swap (stack ≈1 GiB). Creating an AWS Organization
   (e.g. for IAM Identity Center) upgrades the account to paid and **forfeits free-plan credits**.
-- **Demo shortcuts** (`ponytail:` in the code): local Terraform state, data on the root volume
+- **Demo shortcuts** (each marked in the code with its limit and upgrade path): local Terraform state, data on the root volume
   (lost with the instance), Loki on local disk, Mailpit/alert-sink instead of real email/Slack,
   the host reuses the local `.env` secret values.
 
@@ -447,7 +635,8 @@ scripts/restore.sh backups/<ts>    # replaces both databases; the APIs are stopp
 - Restore runs per database in **one transaction**: a failed restore leaves the data as it was.
 - **On AWS** a systemd timer (`cop-backup.timer`, installed by every deploy) runs the backup daily
   at 02:00 UTC and copies it to `s3://cop-aws-backups-<account>/backups/<ts>/`. The bucket is
-  versioned and the host role can't delete objects, so a compromised host can't erase backups.
+  versioned and the host role can't delete objects: a compromised host can overwrite a backup,
+  but the old version stays recoverable for 30 days.
   The local copy stays in the release directory until a later deploy prunes that release.
   Restore on the host: `scripts/restore.sh s3://cop-aws-backups-<account>/backups/<ts>`.
 - `make test` runs a restore drill (`tests/integration/backup.sh`): back up, **drop the order
@@ -481,7 +670,7 @@ notifications every 5 minutes (`group_interval`), critical ones every minute. Th
 drills found a real bug: restarting a container made Loki reject its replayed log and page
 a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
 
-### Security notes (current state)
+### Security notes
 
 - **Docker socket = root.** Alloy and cAdvisor mount `/var/run/docker.sock`. Mounting it `:ro`
   does *not* limit the Docker API (verified: a container can be created through a `:ro` mount),
@@ -490,7 +679,7 @@ a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
   `/var/lib/docker` from the host, so it stays root-equivalent either way.
 - **Redaction is a safety net, not the primary control.** Alloy redacts secrets before logs
   reach Loki, but Docker's own log files (`docker logs`) still hold the original lines. The
-  real rule is that applications never log secrets (enforced in the app code from Phase 3).
+  real rule is that applications never log secrets (enforced in the app code).
   The JSON pattern only matches string values (`"password": "…"`), not numbers or nested objects.
 - **Locally built images are never pulled.** `cop/ecommerce-api` has `pull_policy: build`
   (API) and `never` (migrate job): the `cop` namespace is unclaimed on Docker Hub, so a pull
@@ -513,7 +702,8 @@ a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
 
 - Node Exporter reports OrbStack's Linux VM, not macOS. Its network metrics cover only its own
   container (bridge networking); per-container traffic comes from cAdvisor.
-- OrbStack's VM has no syslog/journal, so system-log collection is idle locally (active on EC2).
+- System-log collection is idle locally (OrbStack's VM has no syslog) and on the AWS host
+  (Amazon Linux 2023 logs to the journal only; Alloy reads no journal yet).
 - Loki and Alloy images are distroless with no probe tool, so they have no Compose healthcheck;
   `make up` waits for Loki's `/ready`, and Blackbox probes both.
 - Postgres passwords from `.env` are applied only when the `postgres-data` volume is first
@@ -535,10 +725,13 @@ a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
   resolves an alert because Prometheus stopped re-sending it (Prometheus down for 4+
   minutes) and Prometheus later re-sends the same firing, it is not reopened.
 - Correlation only joins **unresolved** incidents: a symptom that fires after its cause's
-  incident auto-resolved opens a new incident.
+  incident auto-resolved opens a new incident. This happens after most outages under
+  traffic: HighHTTPErrorRate and the burn-rate alerts use 5-minute and longer windows, so
+  they keep firing for a few minutes after the cause resolves, and nothing inhibits them
+  then (seen in the drill above: incident 344, 13 s after 343 resolved).
 - `make test` leaves its incidents (environment `incident-test-<pid>`), all resolved, in the
-  history: nothing is deleted. Running it twice within 15 minutes also fires
-  ContainerRestarting for incident-db (each run restarts it once).
+  history: nothing is deleted. Each run also fires ContainerRestarting for ecommerce-api
+  (two restarts, see Alerting); a second run within 15 minutes fires it for incident-db too.
 - `environments/local` stays applied (like the rest of the stack); `terraform destroy` stops at
   the ECR repositories (Floci can't delete them, see above). `make clean` wipes Floci's data;
   the next `make infra` recreates everything (state notices the resources are gone).
@@ -546,32 +739,7 @@ a critical `LokiIngestionFailure` (fixed in Alloy, see "Log pipeline").
 - If a migration fails while an older API container is already running, that container keeps
   running on the previous schema; Compose only blocks starting a new one.
 
-## Prerequisites
-
-- macOS on Apple Silicon with [OrbStack](https://orbstack.dev) (Docker Engine + Compose v2)
-- `make`, `curl`, `git`
-
-Terraform and the AWS CLI are **not** installed on the host; they run as containers.
-
-## Quick start
-
-```bash
-cp .env.example .env
-# fill in the empty passwords in .env (each line says how to generate it)
-make doctor   # read-only toolchain check
-make unit     # app + incident API unit tests, alert rule tests, config checks, terraform fmt (in Docker, no stack needed)
-make up       # build the app, start the stack, wait for healthchecks, reload configs
-make health   # every endpoint ready + AWS CLI provably pointed at Floci
-make test     # integration tests: platform, app, incidents, alerting, backup/restore, Terraform on Floci (~7 min; briefly stops Redis, Postgres, incident-db, both APIs)
-make scan     # Gitleaks, Checkov, actionlint, Trivy (lockfiles + images); same as CI
-make infra    # apply infrastructure/terraform/environments/local to Floci
-make load     # k6 shoppers for 2m (DURATION=5m to change); watch Grafana meanwhile
-make aws ARGS="s3 ls"
-make tf ARGS="version"
-make down     # stop (keeps data); `make clean` deletes volumes after confirmation
-```
-
-## Safety: local credentials cannot reach AWS
+### Safety: local credentials cannot reach AWS
 
 The `aws` and `terraform` containers set `AWS_ACCESS_KEY_ID=test`,
 `AWS_ENDPOINT_URL=http://floci:4566` and never mount `~/.aws`. Even with the
@@ -580,6 +748,6 @@ the caller account is Floci's `000000000000`, and the local Terraform provider r
 any other account (`allowed_account_ids`). Real AWS goes through separate containers
 (`aws-real`, `terraform-aws`); see "Deploying to AWS".
 
-## Environment variables
+### Environment variables
 
 See [.env.example](.env.example); every variable is documented there.

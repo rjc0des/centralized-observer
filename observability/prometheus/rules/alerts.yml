@@ -114,7 +114,7 @@ groups:
           severity: critical
         annotations:
           summary: Postgres is unavailable
-          description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (503).
+          description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (500).
 
       - alert: RedisUnavailable
         expr: min by (environment) (dependency_up{dependency="redis"} or probe_success{dependency="redis"}) == 0
@@ -129,7 +129,8 @@ groups:
     rules:
       # cAdvisor keeps a container's series across restarts and updates its start
       # time, so each restart it observes is one change. Recreated containers (new ID)
-      # don't count, and neither does a single restart (make test restarts the API once).
+      # don't count, and neither does a single restart. make test restarts ecommerce-api twice
+      # (clean-restart check + restore drill), so each run fires this warning for it.
       # ponytail: cAdvisor is sampled every 15s, so it misses runs shorter than that.
       # Measured: a container crashing after 3s restarted 16 times in 8 minutes and was
       # observed twice (this fired after ~6.5 minutes). Fast crash loops of the stack's

@@ -1,5 +1,5 @@
-# Single-binary Loki with filesystem storage (local). The AWS deployment swaps
-# common.storage + schema object_store to S3 (Phase 7).
+# Single-binary Loki with filesystem storage, locally and on the AWS host.
+# ponytail: local disk on AWS too (lost with the instance); S3 object storage if logs must outlive it.
 auth_enabled: false
 
 server:

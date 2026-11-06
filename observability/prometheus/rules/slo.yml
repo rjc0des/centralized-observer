@@ -1,8 +1,8 @@
 # Service level objectives. Each SLI is recorded as an error ratio (bad / all events,
 # or bad / all time) labelled slo=<name>; the error budget is 1 - objective.
 #
-#   availability  ecommerce-api  99.9% of requests are not 5xx          budget 0.1%
-#   latency       ecommerce-api  95% of requests finish within 500 ms   budget 5%   (= p95 < 500ms)
+#   availability  each app (by service)  99.9% of requests are not 5xx          budget 0.1%
+#   latency       each app (by service)  95% of requests finish within 500 ms   budget 5%   (= p95 < 500ms)
 #   freshness     log pipeline   99% of the time logs reach Loki within 60s   budget 1% (7.2h / 30d)
 #
 # Windows: 30 days for the budget; 5m/30m/1h/6h for multi-window, multi-burn-rate

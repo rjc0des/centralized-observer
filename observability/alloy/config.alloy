@@ -44,7 +44,7 @@ loki.source.docker "containers" {
 }
 
 // --- Linux system logs ------------------------------------------------------
-// Matches nothing inside OrbStack's VM (it has no syslog); active on EC2 Ubuntu.
+// Matches nothing inside OrbStack's VM (it has no syslog); active on hosts that write these files (e.g. Ubuntu); Amazon Linux 2023 logs to the journal only.
 local.file_match "system" {
 	path_targets = [{
 		"__path__" = "/host/var/log/{syslog,kern.log,auth.log}",

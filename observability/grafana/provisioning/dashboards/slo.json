@@ -56,7 +56,7 @@
       },
       "options": {
         "mode": "markdown",
-        "content": "**Error budget** = 1 \u2212 objective: the share of events allowed to fail over 30 days. **Budget left** = 1 \u2212 (30-day error ratio \u00f7 budget). **Burn rate** = error ratio \u00f7 budget: 1\u00d7 spends the budget in exactly 30 days; 14.4\u00d7 over 1h *and* 5m pages (ErrorBudgetFastBurn), 6\u00d7 over 6h *and* 30m opens a ticket (ErrorBudgetSlowBurn).\n\n| SLO | Objective | Bad event |\n|---|---|---|\n| availability | 99.9% | ecommerce-api request returned 5xx |\n| latency | 95% | ecommerce-api request took longer than 500 ms |\n| freshness | 99% of the time | a moment when logs are not reaching Loki within 60 s (Alloy or Loki down, Alloy retrying, a push over 60 s) |"
+        "content": "**Error budget** = 1 \u2212 objective: the share of events allowed to fail over 30 days. **Budget left** = 1 \u2212 (30-day error ratio \u00f7 budget). **Burn rate** = error ratio \u00f7 budget: 1\u00d7 spends the budget in exactly 30 days; 14.4\u00d7 over 1h *and* 5m pages (ErrorBudgetFastBurn), 6\u00d7 over 6h *and* 30m opens a ticket (ErrorBudgetSlowBurn).\n\n| SLO | Objective | Bad event |\n|---|---|---|\n| availability | 99.9% | an app request (ecommerce-api, incident-api) returned 5xx |\n| latency | 95% | an app request took longer than 500 ms |\n| freshness | 99% of the time | a moment when logs are not reaching Loki within 60 s (Alloy or Loki down, Alloy retrying, a push over 60 s) |"
       }
     },
     {
@@ -325,7 +325,7 @@
       "targets": [
         {
           "expr": "slo:error_ratio:rate5m{slo=\"availability\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "5m",
+          "legendFormat": "{{service}} 5m",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -334,7 +334,7 @@
         },
         {
           "expr": "slo:error_ratio:rate30m{slo=\"availability\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "30m",
+          "legendFormat": "{{service}} 30m",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
@@ -343,7 +343,7 @@
         },
         {
           "expr": "slo:error_ratio:rate1h{slo=\"availability\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "1h",
+          "legendFormat": "{{service}} 1h",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -352,7 +352,7 @@
         },
         {
           "expr": "slo:error_ratio:rate6h{slo=\"availability\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "6h",
+          "legendFormat": "{{service}} 6h",
           "refId": "D",
           "datasource": {
             "type": "prometheus",
@@ -609,7 +609,7 @@
       "targets": [
         {
           "expr": "slo:error_ratio:rate5m{slo=\"latency\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "5m",
+          "legendFormat": "{{service}} 5m",
           "refId": "A",
           "datasource": {
             "type": "prometheus",
@@ -618,7 +618,7 @@
         },
         {
           "expr": "slo:error_ratio:rate30m{slo=\"latency\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "30m",
+          "legendFormat": "{{service}} 30m",
           "refId": "B",
           "datasource": {
             "type": "prometheus",
@@ -627,7 +627,7 @@
         },
         {
           "expr": "slo:error_ratio:rate1h{slo=\"latency\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "1h",
+          "legendFormat": "{{service}} 1h",
           "refId": "C",
           "datasource": {
             "type": "prometheus",
@@ -636,7 +636,7 @@
         },
         {
           "expr": "slo:error_ratio:rate6h{slo=\"latency\",environment=~\"$environment\"} / on (slo) group_left () (1 - slo:objective:ratio)",
-          "legendFormat": "6h",
+          "legendFormat": "{{service}} 6h",
           "refId": "D",
           "datasource": {
             "type": "prometheus",

@@ -50,7 +50,7 @@
       },
       "targets": [
         {
-          "expr": "rate(prometheus_tsdb_head_samples_appended_total[$__rate_interval])",
+          "expr": "sum(rate(prometheus_tsdb_head_samples_appended_total[$__rate_interval]))",
           "legendFormat": "samples",
           "refId": "A",
           "datasource": {
@@ -268,7 +268,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (integration) (rate(alertmanager_notifications_total[$__rate_interval]))",
+          "expr": "sum by (integration) (rate(alertmanager_notifications_total{integration=~\"email|slack|webhook\"}[$__rate_interval]))",
           "legendFormat": "{{integration}}",
           "refId": "A",
           "datasource": {
@@ -315,7 +315,7 @@
       },
       "targets": [
         {
-          "expr": "sum by (integration) (rate(alertmanager_notifications_failed_total[$__rate_interval]))",
+          "expr": "sum by (integration) (rate(alertmanager_notifications_failed_total{integration=~\"email|slack|webhook\"}[$__rate_interval]))",
           "legendFormat": "{{integration}}",
           "refId": "A",
           "datasource": {

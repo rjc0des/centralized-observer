@@ -213,7 +213,7 @@ tests:
           - exp_labels: {severity: critical, environment: test}
             exp_annotations:
               summary: Postgres is unavailable
-              description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (503).
+              description: The API's database check or the TCP probe has failed for 1 minute. Orders and product reads fail (500).
       - eval_time: 3m
         alertname: RedisUnavailable
         exp_alerts:

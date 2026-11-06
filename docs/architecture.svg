@@ -1,0 +1,131 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1180 560" width="1180" height="560" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <title>Centralized Observability Platform: architecture</title>
+  <style>
+    .bg { fill: #ffffff; }
+    .box { fill: #f6f8fa; stroke: #d0d7de; stroke-width: 1.2; }
+    .prom { fill: #fff4ec; stroke: #e6733c; }
+    .logs { fill: #eef6ff; stroke: #4a8fd9; }
+    .alert { fill: #fff0f0; stroke: #d64545; }
+    .resp { fill: #effaf1; stroke: #3c9a5a; }
+    .t { fill: #1f2328; font-size: 15px; font-weight: 600; }
+    .s { fill: #59636e; font-size: 12.5px; }
+    .h { fill: #59636e; font-size: 12px; font-weight: 600; letter-spacing: .08em; }
+    .l { fill: #59636e; font-size: 11.5px; }
+    .a { stroke: #6e7781; stroke-width: 1.5; fill: none; }
+    .d { stroke-dasharray: 5 4; }
+    .head { fill: #6e7781; }
+    @media (prefers-color-scheme: dark) {
+      .bg { fill: #0d1117; }
+      .box { fill: #161b22; stroke: #3d444d; }
+      .prom { fill: #2a1d14; stroke: #e6733c; }
+      .logs { fill: #14202e; stroke: #4a8fd9; }
+      .alert { fill: #2a1616; stroke: #d64545; }
+      .resp { fill: #142318; stroke: #3c9a5a; }
+      .t { fill: #e6edf3; }
+      .s, .h, .l { fill: #9198a1; }
+      .a { stroke: #8b949e; }
+      .head { fill: #8b949e; }
+    }
+  </style>
+  <defs>
+    <marker id="m" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path class="head" d="M0,0 L10,5 L0,10 z"/>
+    </marker>
+  </defs>
+  <rect class="bg" width="1180" height="560" rx="12"/>
+
+  <text class="h" x="30" y="50">SOURCES</text>
+  <text class="h" x="320" y="50">COLLECT AND EVALUATE</text>
+  <text class="h" x="630" y="50">ALERT AND VISUALISE</text>
+  <text class="h" x="930" y="50">RESPOND</text>
+
+  <!-- Sources -->
+  <rect class="box" x="30" y="70" width="220" height="72" rx="8"/>
+  <text class="t" x="46" y="100">ecommerce-api</text>
+  <text class="s" x="46" y="122">Node.js · Fastify · Postgres · Redis</text>
+
+  <rect class="box" x="30" y="162" width="220" height="72" rx="8"/>
+  <text class="t" x="46" y="192">Node Exporter · cAdvisor</text>
+  <text class="s" x="46" y="214">host and container metrics</text>
+
+  <rect class="box" x="30" y="254" width="220" height="72" rx="8"/>
+  <text class="t" x="46" y="284">Blackbox Exporter</text>
+  <text class="s" x="46" y="306">HTTP /health and TCP probes</text>
+
+  <rect class="box" x="30" y="420" width="220" height="72" rx="8"/>
+  <text class="t" x="46" y="450">Container logs</text>
+  <text class="s" x="46" y="472">JSON, every cop-* container</text>
+
+  <!-- Collect -->
+  <rect class="box prom" x="320" y="70" width="240" height="256" rx="8"/>
+  <text class="t" x="336" y="100">Prometheus</text>
+  <text class="s" x="336" y="128">scrape every 15 s</text>
+  <text class="s" x="336" y="150">file-based target discovery</text>
+  <text class="s" x="336" y="172">16 alerts, promtool-tested</text>
+  <text class="s" x="336" y="194">SLIs and 30-day error budgets</text>
+  <text class="s" x="336" y="216">multi-window burn rates</text>
+  <text class="s" x="336" y="238">retention 30 d / 5 GB</text>
+  <text class="l" x="336" y="300">also scrapes itself, the stack</text>
+  <text class="l" x="336" y="315">and incident-api</text>
+
+  <rect class="box logs" x="320" y="420" width="240" height="72" rx="8"/>
+  <text class="t" x="336" y="450">Alloy</text>
+  <text class="s" x="336" y="472">drop replays · redact · parse · label</text>
+
+  <!-- Alert and visualise -->
+  <rect class="box alert" x="630" y="70" width="230" height="110" rx="8"/>
+  <text class="t" x="646" y="100">Alertmanager</text>
+  <text class="s" x="646" y="124">route by severity</text>
+  <text class="s" x="646" y="144">group · inhibit symptoms</text>
+  <text class="s" x="646" y="164">rendered from env at start</text>
+
+  <rect class="box" x="630" y="216" width="230" height="110" rx="8"/>
+  <text class="t" x="646" y="246">Grafana</text>
+  <text class="s" x="646" y="270">5 dashboards, provisioned</text>
+  <text class="s" x="646" y="290">from Git, read-only</text>
+  <text class="s" x="646" y="310">Explore for logs</text>
+
+  <rect class="box logs" x="630" y="420" width="230" height="72" rx="8"/>
+  <text class="t" x="646" y="450">Loki</text>
+  <text class="s" x="646" y="472">72 h · bounded labels</text>
+
+  <!-- Respond -->
+  <rect class="box resp" x="930" y="70" width="220" height="48" rx="8"/>
+  <text class="t" x="946" y="99">Email <tspan class="s">Mailpit or SMTP</tspan></text>
+  <rect class="box resp" x="930" y="132" width="220" height="48" rx="8"/>
+  <text class="t" x="946" y="161">Slack <tspan class="s">alert-sink or webhook</tspan></text>
+
+  <rect class="box resp" x="930" y="216" width="220" height="132" rx="8"/>
+  <text class="t" x="946" y="246">incident-api</text>
+  <text class="s" x="946" y="270">FastAPI · own Postgres</text>
+  <text class="s" x="946" y="290">dedupe · correlate (rules)</text>
+  <text class="s" x="946" y="310">ack · resolve · reports</text>
+  <text class="s" x="946" y="330">spool while its DB is down</text>
+
+  <!-- Arrows: metrics -->
+  <path class="a" d="M250,106 H318" marker-end="url(#m)"/>
+  <path class="a" d="M250,198 H318" marker-end="url(#m)"/>
+  <path class="a" d="M250,290 H318" marker-end="url(#m)"/>
+  <!-- logs -->
+  <path class="a d" d="M250,456 H318" marker-end="url(#m)"/>
+  <path class="a d" d="M560,456 H628" marker-end="url(#m)"/>
+  <path class="a d" d="M745,420 V328" marker-end="url(#m)"/>
+  <text class="l" x="752" y="380">LogQL</text>
+  <!-- rules and queries -->
+  <path class="a" d="M560,110 H628" marker-end="url(#m)"/>
+  <text class="l" x="574" y="102">alerts</text>
+  <path class="a" d="M560,262 H628" marker-end="url(#m)"/>
+  <text class="l" x="572" y="254">PromQL</text>
+  <path class="a" d="M745,180 V214" marker-end="url(#m)"/>
+  <!-- notifications -->
+  <path class="a" d="M860,94 H928" marker-end="url(#m)"/>
+  <text class="l" x="872" y="86">critical</text>
+  <path class="a" d="M860,156 H928" marker-end="url(#m)"/>
+  <path class="a" d="M860,172 H892 V262 H928" marker-end="url(#m)"/>
+  <text class="l" x="898" y="204">webhook</text>
+  <path class="a d" d="M1040,348 V392 H880 V198 H800 V182" marker-end="url(#m)"/>
+  <text class="l" x="890" y="386">reconcile every 15 s</text>
+
+  <text class="l" x="30" y="530">Locally: one Docker Compose project on OrbStack (arm64), AWS APIs emulated by Floci.  On AWS: the same Compose file on one t4g.small in ap-south-1, no inbound ports.</text>
+  <text class="l" x="30" y="548">Solid arrows: metrics, alerts, queries.  Dashed: logs, and the incident service reading Alertmanager's active alerts.</text>
+</svg>
